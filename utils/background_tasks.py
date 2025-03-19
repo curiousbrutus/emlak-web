@@ -2,184 +2,218 @@
 
 import time
 import threading
-import uuid
 import traceback
-from collections import defaultdict
+import gc
+import os
+import tempfile
+import numpy as np
+import streamlit as st
+from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from PIL import Image
 
-# Global task status dictionary
-_task_status = {}
-_task_lock = threading.Lock()
+# These imports might be causing circular dependencies - let's fix them
+from modules.video.video_generation import generate_video
 
 class BackgroundTaskManager:
     """Manages background tasks and their statuses."""
     
-    def start_task(self, func, task_args=None, task_kwargs=None, task_name=None):
+    def __init__(self):
+        """Initialize the background task manager"""
+        self.tasks = {}
+        # Reduce thread pool size to prevent memory issues
+        self.executor = ThreadPoolExecutor(max_workers=1)
+        self._lock = threading.Lock()
+        
+    def start_task(self, task_function, task_args=None, task_name="task", timeout=3600):
         """
-        Start a background task.
+        Start a background task with timeout
         
         Args:
-            func: Function to run in background
-            task_args: Tuple of positional arguments to pass to the function
-            task_kwargs: Dictionary of keyword arguments to pass to the function
-            task_name: Optional name for the task
+            task_function: The function to execute in background
+            task_args: Arguments to pass to the function
+            task_name: Name of the task
+            timeout: Timeout for the task in seconds
             
         Returns:
-            task_id: Unique identifier for the task
+            Task ID
         """
-        task_id = str(uuid.uuid4())
-        task_args = task_args or tuple()
-        task_kwargs = task_kwargs or {}
+        if task_args is None:
+            task_args = ()
+            
+        # Generate a task ID
+        task_id = f"{task_name}_{int(time.time())}"
         
-        # Initialize task status
-        with _task_lock:
-            _task_status[task_id] = {
-                'status': 'starting',
-                'progress': 0,
-                'result': None,
-                'error': None,
-                'started_at': time.time(),
-                'completed_at': None,
-                'name': task_name,
-                'message': 'Görev başlatılıyor...'
+        # Create a task status dictionary
+        with self._lock:
+            self.tasks[task_id] = {
+                "status": "starting",
+                "start_time": datetime.now(),
+                "progress": 0,
+                "result": None,
+                "error": None,
+                "error_details": None,
+                "message": "İşlem başlatılıyor...",
+                "timeout": timeout
             }
         
-        # Create and start thread
-        thread = threading.Thread(
-            target=self._run_task,
-            args=(task_id, func, task_args, task_kwargs),
-            daemon=True
-        )
-        thread.start()
+        # Submit task with timeout handling
+        future = self.executor.submit(self._run_task, task_function, task_args, task_id)
         
+        # Add timeout handling
+        def timeout_handler():
+            time.sleep(timeout)
+            if not future.done():
+                with self._lock:
+                    if task_id in self.tasks and self.tasks[task_id]["status"] == "running":
+                        self.tasks[task_id]["status"] = "failed"
+                        self.tasks[task_id]["error"] = "İşlem zaman aşımına uğradı"
+                        self.tasks[task_id]["message"] = "Zaman aşımı hatası!"
+                future.cancel()
+        
+        threading.Thread(target=timeout_handler, daemon=True).start()
         return task_id
-    
-    def _run_task(self, task_id, func, args, kwargs):
-        """Internal function to run a task and update its status."""
+        
+    def _run_task(self, task_function, task_args, task_id):
+        """
+        Execute the task and update its status
+        
+        Args:
+            task_function: Function to execute
+            task_args: Arguments for the function
+            task_id: Task ID
+        """
         try:
+            # Force garbage collection before starting
+            gc.collect()
+            
             # Update status to running
-            self.update_task_status(task_id, status='running', progress=5, 
-                                   message='Görev çalışıyor...')
+            with self._lock:
+                self.tasks[task_id]["status"] = "running"
+                self.tasks[task_id]["message"] = "İşlem çalışıyor..."
             
-            # Run the function
-            result = func(*args, **kwargs, task_id=task_id)
+            # Create a progress callback
+            def progress_callback(progress_percentage, message=None):
+                with self._lock:
+                    if task_id in self.tasks:
+                        # Ensure progress is between 0-100
+                        self.tasks[task_id]["progress"] = min(100, max(0, progress_percentage * 100))
+                        if message:
+                            self.tasks[task_id]["message"] = message
+                            print(f"Progress update: {message} ({progress_percentage:.1%})")
             
-            # Update status to completed
-            with _task_lock:
-                _task_status[task_id]['status'] = 'completed'
-                _task_status[task_id]['result'] = result
-                _task_status[task_id]['progress'] = 100
-                _task_status[task_id]['completed_at'] = time.time()
-                _task_status[task_id]['message'] = 'Görev tamamlandı!'
+            # Run the task with timeout handling
+            max_duration = 1800  # 30 minutes max
+            task_args_with_callback = task_args + (progress_callback,)
                 
+            # Execute task with progress callback
+            result = task_function(*task_args_with_callback)
+            
+            # Task completed successfully
+            with self._lock:
+                if task_id in self.tasks:
+                    self.tasks[task_id]["status"] = "completed"
+                    self.tasks[task_id]["result"] = result
+                    self.tasks[task_id]["progress"] = 100
+                    self.tasks[task_id]["message"] = "İşlem başarıyla tamamlandı."
+            
+            # Force garbage collection to free memory
+            gc.collect()
+            
         except Exception as e:
-            # Update status to failed
+            # Task failed
             error_details = traceback.format_exc()
-            with _task_lock:
-                _task_status[task_id]['status'] = 'failed'
-                _task_status[task_id]['error'] = str(e)
-                _task_status[task_id]['error_details'] = error_details
-                _task_status[task_id]['completed_at'] = time.time()
-                _task_status[task_id]['message'] = f'Hata: {str(e)}'
+            print(f"Task {task_id} failed: {str(e)}")
+            print(error_details)
+            
+            with self._lock:
+                if task_id in self.tasks:
+                    self.tasks[task_id]["status"] = "failed"
+                    self.tasks[task_id]["error"] = str(e)
+                    self.tasks[task_id]["error_details"] = error_details
+                    self.tasks[task_id]["message"] = f"Hata: {str(e)}"
+            
+            # Force garbage collection on error too
+            gc.collect()
     
     def get_task_status(self, task_id):
-        """Get the current status of a task."""
-        with _task_lock:
-            return _task_status.get(task_id)
+        """
+        Get the current status of a task
+        
+        Args:
+            task_id: The task ID
+            
+        Returns:
+            Task status dictionary or None if task doesn't exist
+        """
+        with self._lock:
+            return self.tasks.get(task_id)
     
-    def update_task_status(self, task_id, **kwargs):
-        """Update the status of a task."""
-        with _task_lock:
-            if task_id in _task_status:
-                for key, value in kwargs.items():
-                    _task_status[task_id][key] = value
+    def cancel_task(self, task_id):
+        """
+        Cancel a running task
+        
+        Args:
+            task_id: The task ID
+            
+        Returns:
+            True if task was canceled, False otherwise
+        """
+        with self._lock:
+            if task_id in self.tasks and self.tasks[task_id]["status"] == "running":
+                # We can't actually stop the thread, but we can mark it as canceled
+                self.tasks[task_id]["status"] = "canceled"
+                return True
+        return False
     
     def cleanup_completed_tasks(self, max_age_seconds=3600):
-        """Remove completed tasks older than max_age_seconds."""
-        current_time = time.time()
-        with _task_lock:
-            task_ids = list(_task_status.keys())
-            for task_id in task_ids:
-                task = _task_status[task_id]
-                if task['status'] in ('completed', 'failed'):
-                    if task['completed_at'] and (current_time - task['completed_at']) > max_age_seconds:
-                        del _task_status[task_id]
+        """
+        Remove old completed tasks from memory
+        
+        Args:
+            max_age_seconds: Maximum age of completed tasks to keep
+        """
+        current_time = datetime.now()
+        with self._lock:
+            tasks_to_remove = []
+            
+            for task_id, task_data in self.tasks.items():
+                if task_data["status"] in ["completed", "failed", "canceled"]:
+                    task_age = current_time - task_data["start_time"]
+                    if task_age.total_seconds() > max_age_seconds:
+                        tasks_to_remove.append(task_id)
+            
+            for task_id in tasks_to_remove:
+                del self.tasks[task_id]
 
-def generate_video_in_background(images, audio_path, transition_type, fps, quality, task_id=None):
-    """
-    Generate video in background thread with progress updates.
-    
-    Args:
-        images: List of images for the video
-        audio_path: Path to audio file
-        transition_type: Type of transition effect
-        fps: Frames per second
-        quality: Video quality (normal/high)
-        task_id: ID of the background task
-        
-    Returns:
-        Path to the generated video
-    """
-    task_manager = BackgroundTaskManager()
-    
+
+def generate_video_in_background(images, audio_path, transition_type, fps=30, quality="normal", temp_dir=None, final_path=None, progress_callback=None):
+    """Background task wrapper for video generation"""
     try:
-        # Import here to avoid circular imports
-        from modules.video.video_generation import generate_video
-        
-        # Update task status at key points
-        task_manager.update_task_status(
-            task_id, 
-            status='preparing', 
-            progress=10,
-            message='Video oluşturma hazırlıkları yapılıyor...'
+        # Create default paths if not provided
+        if temp_dir is None:
+            temp_dir = os.path.join(os.path.dirname(__file__), '..', 'temp')
+        if final_path is None:
+            storage_dir = os.path.join(os.path.dirname(__file__), '..', 'storage')
+            timestamp = time.strftime("%Y%m%d-%H%M%S")
+            final_path = os.path.join(storage_dir, f'emlak_video_{timestamp}.mp4')
+
+        # Ensure directories exist
+        os.makedirs(os.path.dirname(temp_dir), exist_ok=True)
+        os.makedirs(os.path.dirname(final_path), exist_ok=True)
+
+        return generate_video(
+            images, 
+            audio_path, 
+            transition_type, 
+            fps, 
+            quality,
+            temp_dir,
+            final_path,
+            progress_callback
         )
-        
-        # Create a wrapper function to update progress
-        def progress_callback(stage, percent, message=""):
-            task_manager.update_task_status(
-                task_id,
-                status=stage,
-                progress=percent,
-                message=message
-            )
-        
-        # Process images
-        task_manager.update_task_status(
-            task_id, 
-            status='processing_images', 
-            progress=20,
-            message=f'{len(images)} görüntü işleniyor...'
-        )
-        
-        # Generate video
-        task_manager.update_task_status(
-            task_id, 
-            status='generating_video', 
-            progress=40,
-            message='Video oluşturuluyor, lütfen bekleyin...'
-        )
-        
-        # Actual video generation - the function itself now reports progress
-        video_path = generate_video(images, audio_path, transition_type, fps, quality)
-        
-        # Final update before completion
-        task_manager.update_task_status(
-            task_id, 
-            status='finalizing', 
-            progress=95,
-            message='Video tamamlanıyor...'
-        )
-        
-        # Wait a moment to ensure UI updates correctly
-        time.sleep(1)
-        
-        return video_path
-        
     except Exception as e:
-        # Make sure error is properly captured
-        task_manager.update_task_status(
-            task_id, 
-            status='failed', 
-            error=str(e),
-            error_details=traceback.format_exc()
-        )
+        import traceback
+        error_details = traceback.format_exc()
+        print(f"Video generation error: {str(e)}\n{error_details}")
         raise
