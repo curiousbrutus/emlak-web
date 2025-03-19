@@ -9,20 +9,8 @@ from io import BytesIO
 from streamlit_drawable_canvas import st_canvas
 
 def enhance_image(image, boost_factor=1.5, preserve_colors=True):
-    """
-    Enhance colors and vibrancy of an image while maintaining color stability.
-    Also checks if image is grayscale and converts to color if needed.
-    
-    Args:
-        image: PIL image to enhance
-        boost_factor: Factor to boost saturation
-        preserve_colors: If True, preserves original colors without heavy enhancement
-        
-    Returns:
-        Enhanced PIL image
-    """
+    """Enhanced version of image processing"""
     try:
-        # Convert PIL Image to OpenCV format if needed
         if isinstance(image, Image.Image):
             img_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
         else:
@@ -30,41 +18,42 @@ def enhance_image(image, boost_factor=1.5, preserve_colors=True):
             
         # Check if image is grayscale
         is_grayscale = len(img_cv.shape) == 2 or (len(img_cv.shape) == 3 and img_cv.shape[2] == 1)
-        if is_grayscale:
-            # Convert grayscale to color
-            img_cv = cv2.cvtColor(img_cv, cv2.COLOR_GRAY2BGR)
         
-        # For colored images, enhance them
-        # Convert to HSV to manipulate saturation
-        hsv = cv2.cvtColor(img_cv, cv2.COLOR_BGR2HSV).astype("float32")
-        
-        # Increase saturation - even for previously grayscale images to add some color
-        (h, s, v) = cv2.split(hsv)
-        
-        if is_grayscale:
-            # Apply stronger enhancement for grayscale images
-            s = np.clip(s + 50, 0, 255)  # Add base saturation
-        else:
-            # For already colored images
-            s = np.clip(s * boost_factor, 0, 255)
+        # Convert to LAB color space for better color enhancement
+        if not is_grayscale:
+            lab = cv2.cvtColor(img_cv, cv2.COLOR_BGR2LAB)
+            l, a, b = cv2.split(lab)
             
-        # Enhance brightness slightly
-        v = np.clip(v * 1.1, 0, 255)
+            # Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
+            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+            l = clahe.apply(l)
+            
+            # Merge channels
+            lab = cv2.merge((l,a,b))
+            img_cv = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
         
-        # Merge and convert back to BGR
-        hsv = cv2.merge([h, s, v])
-        enhanced = cv2.cvtColor(hsv.astype("uint8"), cv2.COLOR_HSV2BGR)
+        # Apply denoising
+        img_cv = cv2.fastNlMeansDenoisingColored(img_cv, None, 10, 10, 7, 21)
         
-        # Subtle sharpening
-        kernel = np.array([[0, -0.5, 0], [-0.5, 3, -0.5], [0, -0.5, 0]])
-        enhanced = cv2.filter2D(enhanced, -1, kernel)
+        # Enhance sharpness
+        kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
+        img_cv = cv2.filter2D(img_cv, -1, kernel)
+        
+        # Boost saturation if needed
+        if boost_factor > 1.0:
+            hsv = cv2.cvtColor(img_cv, cv2.COLOR_BGR2HSV).astype("float32")
+            (h, s, v) = cv2.split(hsv)
+            s = np.clip(s * boost_factor, 0, 255)
+            v = np.clip(v * 1.1, 0, 255)  # Slight brightness boost
+            hsv = cv2.merge([h, s, v])
+            img_cv = cv2.cvtColor(hsv.astype("uint8"), cv2.COLOR_HSV2BGR)
         
         # Convert back to PIL Image
-        enhanced_pil = Image.fromarray(cv2.cvtColor(enhanced, cv2.COLOR_BGR2RGB))
+        enhanced_pil = Image.fromarray(cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB))
         return enhanced_pil
     except Exception as e:
         st.warning(f"Image enhancement failed: {e}")
-        return image  # Return original image if enhancement fails
+        return image
 
 def fetch_satellite_image(address=None, lat=None, lng=None, zoom=18, size="640x640", maptype="satellite"):
     """

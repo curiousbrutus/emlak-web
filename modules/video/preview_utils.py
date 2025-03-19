@@ -69,10 +69,10 @@ def show_video_preview(images, audio_path=None):
                 # Create and display GIF preview
                 gif_path = create_gif_preview(images[:min(8, len(images))])
                 if gif_path:
-                    st.image(gif_path, use_column_width=True)
+                    st.image(gif_path, use_container_width=True)
                     st.caption("Animasyon örneği (gerçek video daha yüksek kalitede olacak)")
             else:
-                st.image(images[0], use_column_width=True)
+                st.image(images[0], use_container_width=True)
                 st.caption("Önizleme için en az 2 görüntü gereklidir")
         
         with col2:
@@ -93,4 +93,4 @@ def show_video_preview(images, audio_path=None):
         cols = st.columns(4)
         for i, img in enumerate(images):
             with cols[i % 4]:
-                st.image(img, caption=f"Görüntü {i+1}", use_column_width=True)
+                st.image(img, caption=f"Görüntü {i+1}", use_container_width=True)
