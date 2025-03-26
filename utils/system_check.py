@@ -10,7 +10,7 @@ def check_ffmpeg():
     """Check if FFmpeg is installed and working."""
     try:
         ffmpeg_path = shutil.which('ffmpeg')
-        if ffmpeg_path:
+        if (ffmpeg_path):
             result = subprocess.run(['ffmpeg', '-version'], 
                                   stdout=subprocess.PIPE, 
                                   stderr=subprocess.PIPE,
@@ -106,9 +106,9 @@ def run_dependency_checks():
     
     return results
 
-def display_system_info():
+def display_system_info(use_expander=True):
     """Display system information in Streamlit."""
-    with st.expander("🖥️ Sistem Bilgileri"):
+    def show_info():
         try:
             results = run_dependency_checks()
             
@@ -145,15 +145,18 @@ def display_system_info():
                         st.success("✅ Video desteği mevcut")
                     else:
                         st.warning("⚠️ OpenCV video desteği sınırlı")
-                    
                     st.write(f"**Kodekler:** {', '.join(results['opencv']['available_codecs'])}")
                 else:
                     st.error(f"❌ OpenCV hatası: {results['opencv']['error']}")
         
         except Exception as e:
             st.error(f"Sistem bilgileri alınamadı: {str(e)}")
-            
-        st.info("Video oluşturma işlemi sırasında sorun yaşıyorsanız, FFmpeg ve OpenCV'nin düzgün kurulduğundan emin olun.")
+    
+    if use_expander:
+        with st.expander("🖥️ Sistem Bilgileri"):
+            show_info()
+    else:
+        show_info()
 
 # Add this to your app setup or settings page
 if __name__ == "__main__":

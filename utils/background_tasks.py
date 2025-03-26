@@ -187,33 +187,35 @@ class BackgroundTaskManager:
                 del self.tasks[task_id]
 
 
-def generate_video_in_background(images, audio_path, transition_type, fps=30, quality="normal", temp_dir=None, final_path=None, progress_callback=None):
+def generate_video_in_background(images, audio_path, transition_type, fps=30, quality="normal", progress_callback=None):
     """Background task wrapper for video generation"""
     try:
-        # Create default paths if not provided
-        if temp_dir is None:
-            temp_dir = os.path.join(os.path.dirname(__file__), '..', 'temp')
-        if final_path is None:
-            storage_dir = os.path.join(os.path.dirname(__file__), '..', 'storage')
-            timestamp = time.strftime("%Y%m%d-%H%M%S")
-            final_path = os.path.join(storage_dir, f'emlak_video_{timestamp}.mp4')
-
+        # Create paths for temp and storage directories
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        temp_dir = os.path.join(project_root, 'temp')
+        storage_dir = os.path.join(project_root, 'storage')
+        
         # Ensure directories exist
-        os.makedirs(os.path.dirname(temp_dir), exist_ok=True)
-        os.makedirs(os.path.dirname(final_path), exist_ok=True)
-
+        os.makedirs(temp_dir, exist_ok=True)
+        os.makedirs(storage_dir, exist_ok=True)
+        
+        # Generate unique filename for final video
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        final_path = os.path.join(storage_dir, f'emlak_video_{timestamp}.mp4')
+        
+        # Generate video with progress tracking
         return generate_video(
-            images, 
-            audio_path, 
-            transition_type, 
-            fps, 
-            quality,
-            temp_dir,
-            final_path,
-            progress_callback
+            images=images,
+            audio_path=audio_path,
+            transition_type=transition_type,
+            fps=fps,
+            quality=quality,
+            temp_dir=temp_dir,
+            final_path=final_path,
+            progress_callback=progress_callback
         )
+
     except Exception as e:
-        import traceback
-        error_details = traceback.format_exc()
-        print(f"Video generation error: {str(e)}\n{error_details}")
+        print(f"Background video generation error: {str(e)}")
+        traceback.print_exc()
         raise

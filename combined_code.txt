@@ -1,0 +1,4619 @@
+# File: /home/jobbe/Desktop/Projects/emlak-web/utils/system_check.py
+"""Utility to check system dependencies for video generation."""
+
+import subprocess
+import shutil
+import platform
+import os
+import streamlit as st
+
+def check_ffmpeg():
+    """Check if FFmpeg is installed and working."""
+    try:
+        ffmpeg_path = shutil.which('ffmpeg')
+        if ffmpeg_path:
+            result = subprocess.run(['ffmpeg', '-version'], 
+                                  stdout=subprocess.PIPE, 
+                                  stderr=subprocess.PIPE,
+                                  text=True)
+            return True, ffmpeg_path, result.stdout.split('\n')[0]
+        else:
+            return False, None, "FFmpeg not found in PATH"
+    except Exception as e:
+        return False, None, str(e)
+
+def check_opencv():
+    """Check OpenCV version and capabilities."""
+    import cv2
+    version = cv2.__version__
+    
+    # Check if OpenCV was built with video support
+    has_video = "Video I/O" in cv2.getBuildInformation()
+    
+    # Check available video codecs
+    codecs = []
+    for codec in ['XVID', 'MJPG', 'X264', 'AVC1', 'H264']:
+        try:
+            if cv2.VideoWriter_fourcc(*codec) != -1:
+                codecs.append(codec)
+        except:
+            pass
+    
+    return version, has_video, codecs
+
+def check_system_resources():
+    """Check system resources."""
+    try:
+        import psutil
+        
+        # Memory info
+        memory = psutil.virtual_memory()
+        free_memory_gb = memory.available / (1024**3)
+        
+        # CPU info
+        cpu_count = os.cpu_count()
+        cpu_usage = psutil.cpu_percent(interval=1)
+        
+        # Disk info
+        disk = psutil.disk_usage('/')
+        free_disk_gb = disk.free / (1024**3)
+        
+        return {
+            "free_memory_gb": free_memory_gb,
+            "cpu_count": cpu_count,
+            "cpu_usage": cpu_usage,
+            "free_disk_gb": free_disk_gb
+        }
+    except ImportError:
+        return {
+            "error": "psutil module not installed",
+            "cpu_count": os.cpu_count()
+        }
+
+def run_dependency_checks():
+    """Run all dependency checks and return results."""
+    results = {}
+    
+    # System info
+    results["system"] = {
+        "platform": platform.system(),
+        "platform_version": platform.version(),
+        "python_version": platform.python_version()
+    }
+    
+    # FFmpeg
+    ffmpeg_ok, ffmpeg_path, ffmpeg_version = check_ffmpeg()
+    results["ffmpeg"] = {
+        "available": ffmpeg_ok,
+        "path": ffmpeg_path,
+        "version": ffmpeg_version
+    }
+    
+    # OpenCV
+    try:
+        cv_version, has_video, codecs = check_opencv()
+        results["opencv"] = {
+            "version": cv_version,
+            "has_video": has_video,
+            "available_codecs": codecs
+        }
+    except Exception as e:
+        results["opencv"] = {
+            "error": str(e)
+        }
+    
+    # System resources
+    results["resources"] = check_system_resources()
+    
+    return results
+
+def display_system_info():
+    """Display system information in Streamlit."""
+    with st.expander("🖥️ Sistem Bilgileri"):
+        try:
+            results = run_dependency_checks()
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.subheader("Sistem")
+                st.write(f"**Platform:** {results['system']['platform']} {results['system']['platform_version']}")
+                st.write(f"**Python:** {results['system']['python_version']}")
+                
+                if 'resources' in results and 'error' not in results['resources']:
+                    st.subheader("Kaynaklar")
+                    if "free_memory_gb" in results['resources']:
+                        st.write(f"**Boş Bellek:** {results['resources']['free_memory_gb']:.1f} GB")
+                    st.write(f"**CPU Çekirdek:** {results['resources']['cpu_count']}")
+                    if "cpu_usage" in results['resources']:
+                        st.write(f"**CPU Kullanımı:** {results['resources']['cpu_usage']}%")
+                    if "free_disk_gb" in results['resources']:
+                        st.write(f"**Boş Disk:** {results['resources']['free_disk_gb']:.1f} GB")
+            
+            with col2:
+                st.subheader("FFmpeg")
+                if results['ffmpeg']['available']:
+                    st.success("✅ FFmpeg kurulu")
+                    st.write(f"**Versiyon:** {results['ffmpeg']['version']}")
+                else:
+                    st.error("❌ FFmpeg kurulu değil")
+                    st.write("FFmpeg video oluşturma için gereklidir.")
+                
+                st.subheader("OpenCV")
+                if 'error' not in results['opencv']:
+                    st.write(f"**Versiyon:** {results['opencv']['version']}")
+                    if results['opencv']['has_video']:
+                        st.success("✅ Video desteği mevcut")
+                    else:
+                        st.warning("⚠️ OpenCV video desteği sınırlı")
+                    
+                    st.write(f"**Kodekler:** {', '.join(results['opencv']['available_codecs'])}")
+                else:
+                    st.error(f"❌ OpenCV hatası: {results['opencv']['error']}")
+        
+        except Exception as e:
+            st.error(f"Sistem bilgileri alınamadı: {str(e)}")
+            
+        st.info("Video oluşturma işlemi sırasında sorun yaşıyorsanız, FFmpeg ve OpenCV'nin düzgün kurulduğundan emin olun.")
+
+# Add this to your app setup or settings page
+if __name__ == "__main__":
+    display_system_info()
+-e 
+
+# File: /home/jobbe/Desktop/Projects/emlak-web/utils/background_tasks.py
+"""Background task management utilities."""
+
+import time
+import threading
+import traceback
+import gc
+import os
+import tempfile
+import numpy as np
+import streamlit as st
+from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from PIL import Image
+
+# These imports might be causing circular dependencies - let's fix them
+from modules.video.video_generation import generate_video
+
+class BackgroundTaskManager:
+    """Manages background tasks and their statuses."""
+    
+    def __init__(self):
+        """Initialize the background task manager"""
+        self.tasks = {}
+        # Reduce thread pool size to prevent memory issues
+        self.executor = ThreadPoolExecutor(max_workers=1)
+        self._lock = threading.Lock()
+        
+    def start_task(self, task_function, task_args=None, task_name="task", timeout=3600):
+        """
+        Start a background task with timeout
+        
+        Args:
+            task_function: The function to execute in background
+            task_args: Arguments to pass to the function
+            task_name: Name of the task
+            timeout: Timeout for the task in seconds
+            
+        Returns:
+            Task ID
+        """
+        if task_args is None:
+            task_args = ()
+            
+        # Generate a task ID
+        task_id = f"{task_name}_{int(time.time())}"
+        
+        # Create a task status dictionary
+        with self._lock:
+            self.tasks[task_id] = {
+                "status": "starting",
+                "start_time": datetime.now(),
+                "progress": 0,
+                "result": None,
+                "error": None,
+                "error_details": None,
+                "message": "İşlem başlatılıyor...",
+                "timeout": timeout
+            }
+        
+        # Submit task with timeout handling
+        future = self.executor.submit(self._run_task, task_function, task_args, task_id)
+        
+        # Add timeout handling
+        def timeout_handler():
+            time.sleep(timeout)
+            if not future.done():
+                with self._lock:
+                    if task_id in self.tasks and self.tasks[task_id]["status"] == "running":
+                        self.tasks[task_id]["status"] = "failed"
+                        self.tasks[task_id]["error"] = "İşlem zaman aşımına uğradı"
+                        self.tasks[task_id]["message"] = "Zaman aşımı hatası!"
+                future.cancel()
+        
+        threading.Thread(target=timeout_handler, daemon=True).start()
+        return task_id
+        
+    def _run_task(self, task_function, task_args, task_id):
+        """
+        Execute the task and update its status
+        
+        Args:
+            task_function: Function to execute
+            task_args: Arguments for the function
+            task_id: Task ID
+        """
+        try:
+            # Force garbage collection before starting
+            gc.collect()
+            
+            # Update status to running
+            with self._lock:
+                self.tasks[task_id]["status"] = "running"
+                self.tasks[task_id]["message"] = "İşlem çalışıyor..."
+            
+            # Create a progress callback
+            def progress_callback(progress_percentage, message=None):
+                with self._lock:
+                    if task_id in self.tasks:
+                        # Ensure progress is between 0-100
+                        self.tasks[task_id]["progress"] = min(100, max(0, progress_percentage * 100))
+                        if message:
+                            self.tasks[task_id]["message"] = message
+                            print(f"Progress update: {message} ({progress_percentage:.1%})")
+            
+            # Run the task with timeout handling
+            max_duration = 1800  # 30 minutes max
+            task_args_with_callback = task_args + (progress_callback,)
+                
+            # Execute task with progress callback
+            result = task_function(*task_args_with_callback)
+            
+            # Task completed successfully
+            with self._lock:
+                if task_id in self.tasks:
+                    self.tasks[task_id]["status"] = "completed"
+                    self.tasks[task_id]["result"] = result
+                    self.tasks[task_id]["progress"] = 100
+                    self.tasks[task_id]["message"] = "İşlem başarıyla tamamlandı."
+            
+            # Force garbage collection to free memory
+            gc.collect()
+            
+        except Exception as e:
+            # Task failed
+            error_details = traceback.format_exc()
+            print(f"Task {task_id} failed: {str(e)}")
+            print(error_details)
+            
+            with self._lock:
+                if task_id in self.tasks:
+                    self.tasks[task_id]["status"] = "failed"
+                    self.tasks[task_id]["error"] = str(e)
+                    self.tasks[task_id]["error_details"] = error_details
+                    self.tasks[task_id]["message"] = f"Hata: {str(e)}"
+            
+            # Force garbage collection on error too
+            gc.collect()
+    
+    def get_task_status(self, task_id):
+        """
+        Get the current status of a task
+        
+        Args:
+            task_id: The task ID
+            
+        Returns:
+            Task status dictionary or None if task doesn't exist
+        """
+        with self._lock:
+            return self.tasks.get(task_id)
+    
+    def cancel_task(self, task_id):
+        """
+        Cancel a running task
+        
+        Args:
+            task_id: The task ID
+            
+        Returns:
+            True if task was canceled, False otherwise
+        """
+        with self._lock:
+            if task_id in self.tasks and self.tasks[task_id]["status"] == "running":
+                # We can't actually stop the thread, but we can mark it as canceled
+                self.tasks[task_id]["status"] = "canceled"
+                return True
+        return False
+    
+    def cleanup_completed_tasks(self, max_age_seconds=3600):
+        """
+        Remove old completed tasks from memory
+        
+        Args:
+            max_age_seconds: Maximum age of completed tasks to keep
+        """
+        current_time = datetime.now()
+        with self._lock:
+            tasks_to_remove = []
+            
+            for task_id, task_data in self.tasks.items():
+                if task_data["status"] in ["completed", "failed", "canceled"]:
+                    task_age = current_time - task_data["start_time"]
+                    if task_age.total_seconds() > max_age_seconds:
+                        tasks_to_remove.append(task_id)
+            
+            for task_id in tasks_to_remove:
+                del self.tasks[task_id]
+
+
+def generate_video_in_background(images, audio_path, transition_type, fps=30, quality="normal", temp_dir=None, final_path=None, progress_callback=None):
+    """Background task wrapper for video generation"""
+    try:
+        # Create default paths if not provided
+        if temp_dir is None:
+            temp_dir = os.path.join(os.path.dirname(__file__), '..', 'temp')
+        if final_path is None:
+            storage_dir = os.path.join(os.path.dirname(__file__), '..', 'storage')
+            timestamp = time.strftime("%Y%m%d-%H%M%S")
+            final_path = os.path.join(storage_dir, f'emlak_video_{timestamp}.mp4')
+
+        # Ensure directories exist
+        os.makedirs(os.path.dirname(temp_dir), exist_ok=True)
+        os.makedirs(os.path.dirname(final_path), exist_ok=True)
+
+        return generate_video(
+            images, 
+            audio_path, 
+            transition_type, 
+            fps, 
+            quality,
+            temp_dir,
+            final_path,
+            progress_callback
+        )
+    except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
+        print(f"Video generation error: {str(e)}\n{error_details}")
+        raise
+-e 
+
+# File: /home/jobbe/Desktop/Projects/emlak-web/utils/utils.py
+"""General utility functions for the application."""
+
+from math import radians, sin, cos, sqrt, atan2
+import shutil
+import os
+import streamlit as st  # Eksik import eklendi
+
+def calculate_distance(lat1, lng1, lat2, lng2):
+    """
+    Calculate the distance between two coordinates in meters.
+    
+    Args:
+        lat1, lng1: Latitude and longitude of first point
+        lat2, lng2: Latitude and longitude of second point
+        
+    Returns:
+        Distance in meters
+    """
+    # Approximate radius of earth in km
+    R = 6373.0
+    
+    lat1, lng1, lat2, lng2 = map(radians, [lat1, lng1, lat2, lng2])
+    
+    dlon = lng2 - lng1
+    dlat = lat2 - lat1
+    
+    a = sin(dlat / 2)**2 + cos(lat1) * cos(lat2) * sin(dlon / 2)**2
+    c = 2 * atan2(sqrt(a), sqrt(1 - a))
+    
+    distance = R * c
+    
+    return round(distance * 1000)  # Convert to meters
+
+def cleanup_temp_files(filepath):
+    """Clean up temporary files and directories."""
+    try:
+        if filepath and os.path.exists(filepath):
+            temp_dir = os.path.dirname(filepath)
+            shutil.rmtree(temp_dir, ignore_errors=True)
+    except Exception as e:
+        st.warning(f"Cleanup warning: {str(e)}")
+-e 
+
+# File: /home/jobbe/Desktop/Projects/emlak-web/utils/state_manager.py
+"""
+Gelişmiş durum yönetimi (state management) için araçlar.
+"""
+
+import streamlit as st
+import json
+import os
+import pickle
+from datetime import datetime
+from typing import Dict, Any, Optional, Union, List
+
+class StateManager:
+    """Emlak video uygulaması için gelişmiş durum yönetimi sınıfı"""
+    
+    def __init__(self, storage_dir: str = None):
+        """
+        StateManager başlatıcı
+        
+        Args:
+            storage_dir: Durum verilerinin saklanacağı dizin
+        """
+        if storage_dir is None:
+            storage_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "storage")
+        self.storage_dir = storage_dir
+        os.makedirs(storage_dir, exist_ok=True)
+        
+        # Mevcut durum dosyalarını yükle
+        self._project_list = self._load_project_list()
+        
+    def save_state(self, project_name: str, overwrite: bool = False) -> bool:
+        """
+        Mevcut uygulama durumunu kaydeder
+        
+        Args:
+            project_name: Proje adı
+            overwrite: True ise, mevcut projenin üzerine yazar
+            
+        Returns:
+            İşlemin başarılı olup olmadığı
+        """
+        # Aynı isimde proje var mı kontrol et
+        if not overwrite and project_name in self._project_list:
+            return False
+        
+        # Saklanacak session_state anahtarlarını belirle
+        keys_to_save = [
+            'property_location',
+            'property_text',
+            'audio_path',
+            'maps_images',
+            'user_images',
+            'bordered_property_image',
+            'video_quality',
+            'transition_type',
+            'fps',
+            'enhance_colors',
+            'color_boost'
+        ]
+        
+        # Sadece mevcut anahtarları sakla
+        state_data = {}
+        for key in keys_to_save:
+            if key in st.session_state:
+                # PIL.Image ve dosya nesneleri gibi karmaşık nesneleri işle
+                if key == 'maps_images' or key == 'user_images':
+                    # Görüntüleri sakla
+                    images_dir = os.path.join(self.storage_dir, project_name, 'images', key)
+                    os.makedirs(images_dir, exist_ok=True)
+                    saved_paths = []
+                    
+                    for idx, img in enumerate(st.session_state[key]):
+                        img_path = os.path.join(images_dir, f"image_{idx}.png")
+                        img.save(img_path)
+                        saved_paths.append(img_path)
+                    
+                    state_data[key] = saved_paths
+                elif key == 'audio_path':
+                    # Ses dosyasını sakla
+                    if os.path.exists(st.session_state[key]):
+                        audio_dir = os.path.join(self.storage_dir, project_name, 'audio')
+                        os.makedirs(audio_dir, exist_ok=True)
+                        audio_path = os.path.join(audio_dir, 'audio.mp3')
+                        
+                        with open(st.session_state[key], 'rb') as src_file:
+                            with open(audio_path, 'wb') as dst_file:
+                                dst_file.write(src_file.read())
+                                
+                        state_data[key] = audio_path
+                else:
+                    state_data[key] = st.session_state[key]
+        
+        # Proje meta verilerini ekle
+        state_data['_metadata'] = {
+            'saved_date': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'version': '1.0'
+        }
+        
+        # Projeyi kaydet
+        try:
+            project_dir = os.path.join(self.storage_dir, project_name)
+            os.makedirs(project_dir, exist_ok=True)
+            
+            # Ana durum dosyasını kaydet
+            state_path = os.path.join(project_dir, 'state.json')
+            with open(state_path, 'w', encoding='utf-8') as f:
+                json.dump(state_data, f, ensure_ascii=False, default=str)
+            
+            # Proje listesini güncelle
+            if project_name not in self._project_list:
+                self._project_list.append(project_name)
+                self._save_project_list()
+                
+            return True
+        except Exception as e:
+            st.error(f"Proje kaydedilemedi: {str(e)}")
+            return False
+            
+    def load_state(self, project_name: str) -> bool:
+        """
+        Kaydedilmiş bir projeyi yükler
+        
+        Args:
+            project_name: Yüklenecek proje adı
+            
+        Returns:
+            İşlemin başarılı olup olmadığı
+        """
+        try:
+            project_dir = os.path.join(self.storage_dir, project_name)
+            state_path = os.path.join(project_dir, 'state.json')
+            
+            if not os.path.exists(state_path):
+                return False
+                
+            # JSON durum verilerini yükle
+            with open(state_path, 'r', encoding='utf-8') as f:
+                state_data = json.load(f)
+            
+            # Görüntü ve ses dosyalarını işle
+            for key, value in state_data.items():
+                if key == 'maps_images' or key == 'user_images':
+                    # Görüntüleri PIL nesneleri olarak yükle
+                    images = []
+                    for img_path in value:
+                        if os.path.exists(img_path):
+                            from PIL import Image
+                            img = Image.open(img_path)
+                            images.append(img)
+                    
+                    if images:
+                        st.session_state[key] = images
+                elif key != '_metadata':
+                    # Diğer değerleri doğrudan aktar
+                    st.session_state[key] = value
+            
+            return True
+        except Exception as e:
+            st.error(f"Proje yüklenemedi: {str(e)}")
+            return False
+            
+    def get_project_list(self) -> List[str]:
+        """Mevcut projelerin listesini döndürür"""
+        return self._project_list
+        
+    def delete_project(self, project_name: str) -> bool:
+        """
+        Bir projeyi siler
+        
+        Args:
+            project_name: Silinecek proje adı
+            
+        Returns:
+            İşlemin başarılı olup olmadığı
+        """
+        try:
+            project_dir = os.path.join(self.storage_dir, project_name)
+            
+            if os.path.exists(project_dir):
+                import shutil
+                shutil.rmtree(project_dir)
+            
+            # Proje listesini güncelle
+            if project_name in self._project_list:
+                self._project_list.remove(project_name)
+                self._save_project_list()
+                
+            return True
+        except Exception as e:
+            st.error(f"Proje silinemedi: {str(e)}")
+            return False
+            
+    def _load_project_list(self) -> List[str]:
+        """Proje listesini dosyadan yükler"""
+        list_path = os.path.join(self.storage_dir, 'project_list.json')
+        
+        if os.path.exists(list_path):
+            try:
+                with open(list_path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except:
+                return []
+        else:
+            return []
+            
+    def _save_project_list(self) -> None:
+        """Proje listesini dosyaya kaydeder"""
+        list_path = os.path.join(self.storage_dir, 'project_list.json')
+        
+        with open(list_path, 'w', encoding='utf-8') as f:
+            json.dump(self._project_list, f, ensure_ascii=False)
+
+    def get_project_data(self):
+        """
+        Mevcut durumdan proje verilerini alır
+        
+        Returns:
+            Proje verileri sözlüğü
+        """
+        # Saklanacak session_state anahtarlarını belirle
+        keys_to_save = [
+            'property_location',
+            'property_text',
+            'audio_path',
+            'maps_images',
+            'user_images',
+            'bordered_property_image',
+            'video_quality',
+            'transition_type',
+            'fps',
+            'enhance_colors',
+            'color_boost'
+        ]
+        
+        # Sadece mevcut anahtarları al
+        project_data = {}
+        for key in keys_to_save:
+            if key in st.session_state:
+                project_data[key] = st.session_state[key]
+        
+        return project_data
+        
+    def set_project_data(self, project_data):
+        """
+        Proje verilerini mevcut duruma ayarlar
+        
+        Args:
+            project_data: Ayarlanacak proje verileri sözlüğü
+        """
+        for key, value in project_data.items():
+            st.session_state[key] = value
+-e 
+
+# File: /home/jobbe/Desktop/Projects/emlak-web/utils/__init__.py
+-e 
+
+# File: /home/jobbe/Desktop/Projects/emlak-web/utils/cache_utils.py
+"""Custom cache utilities for storing and retrieving data."""
+
+import os
+import pickle
+import hashlib
+import time
+import shutil
+import functools
+import streamlit as st
+from pathlib import Path
+
+# Create cache directory in user's home directory
+CACHE_DIR = Path.home() / ".emlak_web_cache"
+CACHE_DIR.mkdir(exist_ok=True)
+
+# In-memory cache dictionary
+_memory_cache = {}
+
+def _get_cache_key(func_name, args, kwargs):
+    """Generate a unique cache key based on function name and arguments."""
+    key_parts = [func_name]
+    
+    # Add stringified args and kwargs
+    for arg in args:
+        key_parts.append(str(arg))
+    
+    for k, v in sorted(kwargs.items()):
+        key_parts.append(f"{k}={v}")
+    
+    # Create a hash from the key parts
+    key_string = "_".join(key_parts)
+    return hashlib.md5(key_string.encode()).hexdigest()
+
+def cached_data(ttl=3600):
+    """
+    Decorator to cache function results in memory and on disk.
+    
+    Args:
+        ttl: Time to live for cache entries in seconds (default: 1 hour)
+    """
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            # Generate a unique key for this function call
+            cache_key = _get_cache_key(func.__name__, args, kwargs)
+            
+            # Check memory cache first
+            if cache_key in _memory_cache:
+                value, timestamp = _memory_cache[cache_key]
+                if time.time() - timestamp < ttl:
+                    return value
+            
+            # Check disk cache if not in memory or expired
+            cache_file = CACHE_DIR / f"{cache_key}.pkl"
+            if cache_file.exists():
+                try:
+                    with open(cache_file, 'rb') as f:
+                        value, timestamp = pickle.load(f)
+                        if time.time() - timestamp < ttl:
+                            # Store in memory for faster access next time
+                            _memory_cache[cache_key] = (value, timestamp)
+                            return value
+                except (pickle.PickleError, EOFError):
+                    # If any error loading from disk, just regenerate
+                    pass
+            
+            # Cache miss or expired - call the function
+            value = func(*args, **kwargs)
+            
+            # Store result in both memory and disk cache
+            current_time = time.time()
+            _memory_cache[cache_key] = (value, current_time)
+            
+            try:
+                with open(cache_file, 'wb') as f:
+                    pickle.dump((value, current_time), f)
+            except Exception:
+                # If disk cache fails, we still have the memory cache
+                pass
+                
+            return value
+        return wrapper
+    return decorator
+
+def clear_cache():
+    """Clear the in-memory cache."""
+    _memory_cache.clear()
+    st.success("Memory cache cleared!")
+
+def clear_disk_cache():
+    """Clear the disk cache."""
+    try:
+        for file in CACHE_DIR.glob("*.pkl"):
+            file.unlink()
+        st.success("Disk cache cleared!")
+    except Exception as e:
+        st.error(f"Error clearing disk cache: {str(e)}")
+-e 
+
+# File: /home/jobbe/Desktop/Projects/emlak-web/utils/wizard_utils.py
+"""Utilities for the step-by-step wizard interface."""
+
+import streamlit as st
+import time
+from typing import List, Callable, Dict, Any
+
+class WizardStep:
+    def __init__(self, title: str, description: str, render_func: Callable):
+        """
+        Initialize a step in the wizard.
+        
+        Args:
+            title: Step title
+            description: Step description
+            render_func: Function that renders the step content
+        """
+        self.title = title
+        self.description = description
+        self.render_func = render_func
+        self.is_complete = False
+        self.validation_error = None
+
+class Wizard:
+    def __init__(self, name: str, steps: List[WizardStep]):
+        """
+        Create a wizard with multiple steps.
+        
+        Args:
+            name: Wizard name
+            steps: List of WizardStep objects
+        """
+        self.name = name
+        self.steps = steps
+        
+        # Initialize wizard state in session if not exists
+        if f"wizard_{name}_current_step" not in st.session_state:
+            st.session_state[f"wizard_{name}_current_step"] = 0
+        
+        if f"wizard_{name}_data" not in st.session_state:
+            st.session_state[f"wizard_{name}_data"] = {}
+    
+    @property
+    def current_step_index(self) -> int:
+        """Get the current step index."""
+        return st.session_state.get(f"wizard_{self.name}_current_step", 0)
+    
+    @current_step_index.setter
+    def current_step_index(self, value: int):
+        """Set the current step index."""
+        st.session_state[f"wizard_{self.name}_current_step"] = value
+    
+    @property
+    def current_step(self) -> WizardStep:
+        """Get the current step."""
+        return self.steps[self.current_step_index]
+    
+    @property
+    def is_first_step(self) -> bool:
+        """Check if wizard is at the first step."""
+        return self.current_step_index == 0
+    
+    @property
+    def is_last_step(self) -> bool:
+        """Check if wizard is at the last step."""
+        return self.current_step_index == len(self.steps) - 1
+    
+    def get_data(self) -> Dict[str, Any]:
+        """Get all wizard data."""
+        return st.session_state.get(f"wizard_{self.name}_data", {})
+    
+    def set_data(self, key: str, value: Any):
+        """Set a wizard data value."""
+        if f"wizard_{self.name}_data" not in st.session_state:
+            st.session_state[f"wizard_{self.name}_data"] = {}
+        st.session_state[f"wizard_{self.name}_data"][key] = value
+    
+    def next_step(self):
+        """Move to the next step."""
+        if not self.is_last_step:
+            self.current_step_index += 1
+    
+    def previous_step(self):
+        """Move to the previous step."""
+        if not self.is_first_step:
+            self.current_step_index -= 1
+    
+    def go_to_step(self, index: int):
+        """Go to a specific step by index."""
+        if 0 <= index < len(self.steps):
+            self.current_step_index = index
+    
+    def render(self):
+        """Render the wizard interface."""
+        # Display progress bar
+        progress = self.current_step_index / (len(self.steps) - 1)
+        st.progress(progress)
+        
+        # Display step number and title
+        st.header(f"{self.current_step_index + 1}. {self.current_step.title}")
+        st.write(self.current_step.description)
+        
+        # Render step content
+        self.current_step.render_func()
+        
+        # Navigation buttons
+        col1, col2, spacer, col3 = st.columns([1, 1, 3, 1])
+        
+        with col1:
+            if not self.is_first_step:
+                if st.button("⬅️ Önceki", key=f"prev_{self.name}"):
+                    self.previous_step()
+                    st.experimental_rerun()
+        
+        with col2:
+            if not self.is_first_step and not self.is_last_step:
+                if st.button("🏠 Ana Sayfa", key=f"home_{self.name}"):
+                    self.current_step_index = 0
+                    st.experimental_rerun()
+        
+        with col3:
+            if not self.is_last_step:
+                next_button = st.button("Sonraki ➡️", key=f"next_{self.name}")
+                if next_button:
+                    # Attempt to go to next step - validation should happen in the render_func
+                    if not self.current_step.validation_error:
+                        self.next_step()
+                        st.experimental_rerun()
+                    else:
+                        st.error(self.current_step.validation_error)
+            else:
+                if st.button("🎉 Tamamla", key=f"finish_{self.name}", type="primary"):
+                    st.balloons()
+                    st.success("Tüm adımlar tamamlandı!")
+                    # Additional completion logic can be added here
+
+def show_step_indicator(wizard: Wizard):
+    """
+    Show a horizontal step indicator for the wizard.
+    
+    Args:
+        wizard: The wizard object
+    """
+    cols = st.columns(len(wizard.steps))
+    
+    for i, step in enumerate(wizard.steps):
+        with cols[i]:
+            if i < wizard.current_step_index:
+                # Completed step
+                st.markdown(f"<div style='text-align: center; color: green;'>✓<br>{step.title}</div>", 
+                           unsafe_allow_html=True)
+            elif i == wizard.current_step_index:
+                # Current step
+                st.markdown(f"<div style='text-align: center; font-weight: bold;'>● <br>{step.title}</div>", 
+                           unsafe_allow_html=True)
+            else:
+                # Future step
+                st.markdown(f"<div style='text-align: center; color: gray;'>○<br>{step.title}</div>", 
+                           unsafe_allow_html=True)
+-e 
+
+# File: /home/jobbe/Desktop/Projects/emlak-web/config/config.py
+"""Configuration settings for the Real Estate Video Generator."""
+
+import os
+from dotenv import load_dotenv
+import google.generativeai as genai
+import streamlit as st
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Get API keys from environment variables
+GOOGLE_MAPS_API_KEY = os.environ.get("GOOGLE_MAPS_API_KEY", "")
+GOOGLE_PLACES_API_KEY = os.environ.get("GOOGLE_PLACES_API_KEY", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "")
+ELEVENLABS_VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID", "")
+
+# Voice options - Sözlük formatına dönüştürüldü
+VOICE_OPTIONS = {
+    "TxGEqnHWrfWFTfGW9XjX": "Erkek Sesi", 
+    "ErXwobaYiN019PkySvjV": "Kadın Sesi", 
+    "21m00Tcm4TlvDq8ikWAM": "Alternatif Ses"
+}
+DEFAULT_VOICE = ELEVENLABS_VOICE_ID if ELEVENLABS_VOICE_ID in VOICE_OPTIONS else list(VOICE_OPTIONS.keys())[0]
+
+# Define VOICE_LABELS (was missing)
+VOICE_LABELS = VOICE_OPTIONS  # Using the same dictionary for labels
+
+# Ensure video directory exists
+VIDEO_DIR = "/home/jobbe/Desktop/Projects/emlak_web/vids"
+os.makedirs(VIDEO_DIR, exist_ok=True)
+
+# Configure Gemini API if key is available
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+
+# Function to initialize session state
+def initialize_session_state():
+    """Initialize Streamlit session state variables if they don't exist."""
+    if "GOOGLE_MAPS_API_KEY" not in st.session_state:
+        st.session_state["GOOGLE_MAPS_API_KEY"] = GOOGLE_MAPS_API_KEY
+    if "GOOGLE_PLACES_API_KEY" not in st.session_state:
+        st.session_state["GOOGLE_PLACES_API_KEY"] = GOOGLE_PLACES_API_KEY
+    if "GEMINI_API_KEY" not in st.session_state:
+        st.session_state["GEMINI_API_KEY"] = GEMINI_API_KEY
+    if "ELEVENLABS_API_KEY" not in st.session_state:
+        st.session_state["ELEVENLABS_API_KEY"] = ELEVENLABS_API_KEY
+    if "enhance_colors" not in st.session_state:
+        st.session_state["enhance_colors"] = True
+    if "color_boost" not in st.session_state:
+        st.session_state["color_boost"] = 1.5
+    # Add Turkish labels
+    if "voice_labels" not in st.session_state:
+        st.session_state["voice_labels"] = VOICE_LABELS
+-e 
+
+# File: /home/jobbe/Desktop/Projects/emlak-web/modules/integration/social_sharing.py
+"""Social media sharing utilities."""
+
+import streamlit as st
+import qrcode
+import base64
+from io import BytesIO
+from urllib.parse import quote
+import os
+from typing import Dict, Optional
+
+def generate_qr_code(url: str, box_size: int = 10) -> str:
+    """
+    Generate QR code for a URL.
+    
+    Args:
+        url: URL to encode in QR code
+        box_size: QR code box size
+        
+    Returns:
+        Base64 encoded image
+    """
+    qr = qrcode.QRCode(
+        version=1,
+        error_correction=qrcode.constants.ERROR_CORRECT_L,
+        box_size=box_size,
+        border=4,
+    )
+    qr.add_data(url)
+    qr.make(fit=True)
+    
+    img = qr.make_image(fill_color="black", back_color="white")
+    buffered = BytesIO()
+    img.save(buffered, format="PNG")
+    img_str = base64.b64encode(buffered.getvalue()).decode()
+    
+    return img_str
+
+def get_social_share_buttons(url: str, title: str, description: str = None) -> Dict[str, str]:
+    """
+    Generate HTML for social media sharing buttons.
+    
+    Args:
+        url: URL to share
+        title: Content title
+        description: Content description
+        
+    Returns:
+        Dictionary with HTML for each platform
+    """
+    encoded_url = quote(url)
+    encoded_title = quote(title)
+    encoded_description = quote(description or title)
+    
+    buttons = {
+        "whatsapp": f"""
+        <a href="https://api.whatsapp.com/send?text={encoded_title}%20{encoded_url}" 
+           target="_blank" style="text-decoration:none;">
+            <div style="background-color:#25D366;color:white;padding:8px 12px;
+                       border-radius:4px;display:inline-flex;align-items:center;">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+                    <path d="M13.601 2.326A7.854 7.854 0 0 0 7.994 0C3.627 0 .068 3.558.064 7.926c0 1.399.366 2.76 1.057 3.965L0 16l4.204-1.102a7.933 7.933 0 0 0 3.79.965h.004c4.368 0 7.926-3.558 7.93-7.93A7.898 7.898 0 0 0 13.6 2.326zM7.994 14.521a6.573 6.573 0 0 1-3.356-.92l-.24-.144-2.494.654.666-2.433-.156-.251a6.56 6.56 0 0 1-1.007-3.505c0-3.626 2.957-6.584 6.591-6.584a6.56 6.56 0 0 1 4.66 1.931a6.557 6.557 0 0 1 1.928 4.66c-.004 3.639-2.961 6.592-6.592 6.592zm3.615-4.934c-.197-.099-1.17-.578-1.353-.646-.182-.065-.315-.099-.445.099-.133.197-.513.646-.627.775-.114.133-.232.148-.43.05-.197-.1-.836-.308-1.592-.985-.59-.525-.985-1.175-1.103-1.372-.114-.198-.011-.304.088-.403.087-.088.197-.232.296-.346.1-.114.133-.198.198-.33.065-.134.034-.248-.015-.347-.05-.099-.445-1.076-.612-1.47-.16-.389-.323-.335-.445-.34-.114-.007-.247-.007-.38-.007a.729.729 0 0 0-.529.247c-.182.198-.691.677-.691 1.654c0 .977.71 1.916.81 2.049.098.133 1.394 2.132 3.383 2.992.47.205.84.326 1.129.418.475.152.904.129 1.246.08.38-.058 1.171-.48 1.338-.943.164-.464.164-.86.114-.943-.049-.084-.182-.133-.38-.232z"/>
+                </svg>
+                &nbsp;WhatsApp
+            </div>
+        </a>
+        """,
+        
+        "telegram": f"""
+        <a href="https://t.me/share/url?url={encoded_url}&text={encoded_title}" 
+           target="_blank" style="text-decoration:none;">
+            <div style="background-color:#0088cc;color:white;padding:8px 12px;
+                       border-radius:4px;display:inline-flex;align-items:center;">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+                    <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zM8.287 5.906c-.778.324-2.334.994-4.666 2.01-.378.15-.577.298-.595.442-.03.243.275.339.69.47l.175.055c.408.133.958.288 1.243.294.26.006.549-.1.868-.32 2.179-1.471 3.304-2.214 3.374-2.23.05-.012.12-.026.166.016.047.041.042.12.037.141-.03.129-1.227 1.241-1.846 1.817-.193.18-.33.307-.358.336a8.154 8.154 0 0 1-.188.186c-.38.366-.664.64.015 1.088.327.216.589.393.85.571.284.194.568.387.936.629.093.06.183.125.27.187.331.236.63.448.997.414.214-.02.435-.22.547-.82.265-1.417.786-4.486.906-5.751a1.426 1.426 0 0 0-.013-.315.337.337 0 0 0-.114-.217.526.526 0 0 0-.31-.093c-.3.005-.763.166-2.984 1.09z"/>
+                </svg>
+                &nbsp;Telegram
+            </div>
+        </a>
+        """,
+        
+        "facebook": f"""
+        <a href="https://www.facebook.com/sharer/sharer.php?u={encoded_url}" 
+           target="_blank" style="text-decoration:none;">
+            <div style="background-color:#3b5998;color:white;padding:8px 12px;
+                       border-radius:4px;display:inline-flex;align-items:center;">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+                    <path d="M16 8.049c0-4.446-3.582-8.05-8-8.05C3.58 0-.002 3.603-.002 8.05c0 4.017 2.926 7.347 6.75 7.951v-5.625h-2.03V8.05H6.75V6.275c0-2.017 1.195-3.131 3.022-3.131.876 0 1.791.157 1.791.157v1.98h-1.009c-.993 0-1.303.621-1.303 1.258v1.51h2.218l-.354 2.326H9.25V16c3.824-.604 6.75-3.934 6.75-7.951z"/>
+                </svg>
+                &nbsp;Facebook
+            </div>
+        </a>
+        """,
+        
+        "twitter": f"""
+        <a href="https://twitter.com/intent/tweet?text={encoded_title}&url={encoded_url}" 
+           target="_blank" style="text-decoration:none;">
+            <div style="background-color:#1DA1F2;color:white;padding:8px 12px;
+                       border-radius:4px;display:inline-flex;align-items:center;">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+                    <path d="M5.026 15c6.038 0 9.341-5.003 9.341-9.334 0-.14 0-.282-.006-.422A6.685 6.685 0 0 0 16 3.542a6.658 6.658 0 0 1-1.889.518 3.301 3.301 0 0 0 1.447-1.817 6.533 6.533 0 0 1-2.087.793A3.286 3.286 0 0 0 7.875 6.03a9.325 9.325 0 0 1-6.767-3.429 3.289 3.289 0 0 0 1.018 4.382A3.323 3.323 0 0 1 .64 6.575v.045a3.288 3.288 0 0 0 2.632 3.218 3.203 3.203 0 0 1-.865.115 3.23 3.23 0 0 1-.614-.057 3.283 3.283 0 0 0 3.067 2.277A6.588 6.588 0 0 1 .78 13.58a6.32 6.32 0 0 1-.78-.045A9.344 9.344 0 0 0 5.026 15z"/>
+                </svg>
+                &nbsp;Twitter
+            </div>
+        </a>
+        """,
+    }
+    
+    return buttons
+
+def show_qr_code_with_download(url: str, title: str = "QR Kod") -> None:
+    """
+    Display QR code with download button.
+    
+    Args:
+        url: URL to encode in QR code
+        title: Title to display above QR code
+    """
+    qr_img = generate_qr_code(url)
+    
+    col1, col2 = st.columns([1, 2])
+    
+    with col1:
+        st.markdown(f"## {title}")
+        st.markdown(f"""
+        <img src="data:image/png;base64,{qr_img}" width="200"/>
+        """, unsafe_allow_html=True)
+        
+        # Download button
+        qr_data = f"data:image/png;base64,{qr_img}"
+        download_button_str = f"""
+        <a href="{qr_data}" download="qr_code.png">
+            <button style="background-color:#4CAF50;color:white;padding:8px 16px;
+                           border:none;border-radius:4px;cursor:pointer;">
+                İndir
+            </button>
+        </a>
+        """
+        st.markdown(download_button_str, unsafe_allow_html=True)
+    
+    with col2:
+        st.info(
+            "Bu QR kodu tarayarak videoyu mobil cihazlarda izleyebilir veya paylaşabilirsiniz. "
+            "QR kodunu indirip basılı materyallerde kullanabilirsiniz."
+        )
+
+def show_share_buttons(url: str, title: str, description: Optional[str] = None) -> None:
+    """
+    Display social share buttons in a Streamlit app.
+    
+    Args:
+        url: URL to share
+        title: Content title
+        description: Content description
+    """
+    st.markdown("### Paylaş")
+    
+    buttons = get_social_share_buttons(url, title, description)
+    
+    # Display buttons in columns
+    cols = st.columns(4)
+    for i, (platform, button_html) in enumerate(buttons.items()):
+        with cols[i % 4]:
+            st.markdown(button_html, unsafe_allow_html=True)
+    
+    # Display share link
+    st.text_input("Doğrudan Link:", value=url, help="Bu linki kopyalayıp paylaşabilirsiniz")
+-e 
+
+# File: /home/jobbe/Desktop/Projects/emlak-web/modules/integration/real_estate_platforms.py
+"""Integration with popular real estate platforms."""
+
+import streamlit as st
+import json
+import requests
+import time
+from typing import Dict, Any, List, Optional
+import os
+
+# Platform API configs - would normally be in a more secure location
+PLATFORM_CONFIGS = {
+    "sahibinden": {
+        "name": "Sahibinden",
+        "api_url": "https://api.example.com/sahibinden/v1",
+        "logo": "https://www.sahibinden.com/favicon.ico"
+    },
+    "hepsiemlak": {
+        "name": "Hepsiemlak",
+        "api_url": "https://api.example.com/hepsiemlak/v1",
+        "logo": "https://www.hepsiemlak.com/favicon.ico"
+    },
+    "emlakjet": {
+        "name": "Emlakjet",
+        "api_url": "https://api.example.com/emlakjet/v1",
+        "logo": "https://www.emlakjet.com/favicon.ico"
+    },
+    "zingat": {
+        "name": "Zingat",
+        "api_url": "https://api.example.com/zingat/v1", 
+        "logo": "https://www.zingat.com/favicon.ico"
+    }
+}
+
+class RealEstatePlatformIntegration:
+    """Base class for real estate platform integration."""
+    
+    def __init__(self, platform_id: str):
+        """
+        Initialize the integration.
+        
+        Args:
+            platform_id: Platform ID from PLATFORM_CONFIGS
+        """
+        if platform_id not in PLATFORM_CONFIGS:
+            raise ValueError(f"Unknown platform: {platform_id}")
+        
+        self.platform_id = platform_id
+        self.config = PLATFORM_CONFIGS[platform_id]
+        self.api_key = st.session_state.get(f"{platform_id.upper()}_API_KEY")
+    
+    def is_configured(self) -> bool:
+        """Check if the API key is configured."""
+        return bool(self.api_key)
+    
+    def upload_listing(self, property_data: Dict[str, Any], video_url: str) -> Dict[str, Any]:
+        """
+        Upload property listing to the platform (simulated).
+        
+        Args:
+            property_data: Property details
+            video_url: URL to the property video
+            
+        Returns:
+            Response data
+        """
+        if not self.is_configured():
+            return {"success": False, "error": "API key not configured"}
+        
+        # Simulate API call
+        time.sleep(1)  # Simulate network delay
+        
+        # Return simulated response
+        return {
+            "success": True,
+            "listing_id": f"{self.platform_id}_{int(time.time())}",
+            "url": f"https://www.example.com/{self.platform_id}/listing/{int(time.time())}",
+            "message": f"Listing uploaded successfully to {self.config['name']}"
+        }
+    
+    def get_user_listings(self) -> List[Dict[str, Any]]:
+        """
+        Get user's existing listings (simulated).
+        
+        Returns:
+            List of listing data
+        """
+        if not self.is_configured():
+            return []
+        
+        # Simulate API call
+        time.sleep(0.5)
+        
+        # Return simulated listings
+        return [
+            {
+                "id": f"{self.platform_id}_{1000 + i}",
+                "title": f"Örnek İlan {i+1}",
+                "price": 500000 + (i * 100000),
+                "location": "İstanbul, Türkiye",
+                "url": f"https://www.example.com/{self.platform_id}/listing/{1000 + i}"
+            }
+            for i in range(3)
+        ]
+
+def get_available_platforms() -> List[Dict[str, Any]]:
+    """
+    Get list of available platforms with their configuration status.
+    
+    Returns:
+        List of platform data
+    """
+    platforms = []
+    
+    for platform_id, config in PLATFORM_CONFIGS.items():
+        api_key_exists = bool(st.session_state.get(f"{platform_id.upper()}_API_KEY"))
+        
+        platforms.append({
+            "id": platform_id,
+            "name": config["name"],
+            "logo": config["logo"],
+            "configured": api_key_exists
+        })
+    
+    return platforms
+
+def show_platform_setup_form() -> None:
+    """Show form to set up platform API keys."""
+    st.subheader("Emlak Platformları API Ayarları")
+    
+    with st.form("platform_api_keys"):
+        for platform_id, config in PLATFORM_CONFIGS.items():
+            current_key = st.session_state.get(f"{platform_id.upper()}_API_KEY", "")
+            new_key = st.text_input(
+                f"{config['name']} API Anahtarı",
+                value=current_key,
+                type="password",
+                help=f"{config['name']} platformu için API anahtarınızı girin"
+            )
+            if new_key:
+                st.session_state[f"{platform_id.upper()}_API_KEY"] = new_key
+        
+        submitted = st.form_submit_button("API Anahtarlarını Kaydet")
+        if submitted:
+            st.success("API anahtarları kaydedildi!")
+
+def show_upload_form(property_data: Dict[str, Any], video_url: Optional[str] = None) -> None:
+    """
+    Show form to upload listing to platforms.
+    
+    Args:
+        property_data: Property details
+        video_url: URL to the property video
+    """
+    st.subheader("Emlak İlanını Yayınla")
+    
+    platforms = get_available_platforms()
+    configured_platforms = [p for p in platforms if p["configured"]]
+    
+    if not configured_platforms:
+        st.warning("Hiçbir platform yapılandırılmamış. Lütfen önce API ayarlarını yapın.")
+        if st.button("API Ayarlarını Göster"):
+            show_platform_setup_form()
+        return
+    
+    with st.form("publish_listing_form"):
+        st.write("İlanınızı yayınlamak için platform seçin:")
+        
+        selected_platforms = []
+        cols = st.columns(len(configured_platforms))
+        
+        for i, platform in enumerate(configured_platforms):
+            with cols[i]:
+                selected = st.checkbox(
+                    f"{platform['name']}",
+                    value=False,
+                    key=f"publish_{platform['id']}"
+                )
+                
+                if selected:
+                    selected_platforms.append(platform["id"])
+                
+                st.image(platform["logo"], width=50)
+        
+        title = st.text_input("İlan Başlığı:", 
+                           value=f"{property_data.get('property_type', '')} - {property_data.get('area', '')}m² - {property_data.get('rooms', '')} Oda")
+        
+        description = st.text_area(
+            "İlan Açıklaması:", 
+            value=property_data.get("description", ""),
+            height=150
+        )
+        
+        price = st.number_input(
+            "İlan Fiyatı (TL):", 
+            min_value=0, 
+            value=int(property_data.get("price", 0))
+        )
+        
+        submitted = st.form_submit_button("İlanı Yayınla")
+        
+        if submitted:
+            if not selected_platforms:
+                st.error("Lütfen en az bir platform seçin!")
+                return
+                
+            # Prepare listing data
+            listing_data = {
+                "title": title,
+                "description": description,
+                "price": price,
+                "address": property_data.get("address", ""),
+                "property_type": property_data.get("property_type", ""),
+                "rooms": property_data.get("rooms", 0),
+                "bathrooms": property_data.get("bathrooms", 0),
+                "area": property_data.get("area", 0),
+                "year_built": property_data.get("year_built", 0),
+                "video_url": video_url
+            }
+            
+            # Upload to each selected platform
+            results = {}
+            for platform_id in selected_platforms:
+                with st.spinner(f"{PLATFORM_CONFIGS[platform_id]['name']} platformuna yükleniyor..."):
+                    integration = RealEstatePlatformIntegration(platform_id)
+                    result = integration.upload_listing(listing_data, video_url)
+                    results[platform_id] = result
+            
+            # Show results
+            st.success("İlan yayınlama işlemi tamamlandı!")
+            
+            for platform_id, result in results.items():
+                platform_name = PLATFORM_CONFIGS[platform_id]["name"]
+                if result["success"]:
+                    st.success(f"✅ {platform_name}: {result['message']}")
+                    st.markdown(f"🔗 [İlanı Görüntüle]({result['url']})")
+                else:
+                    st.error(f"❌ {platform_name}: {result['error']}")
+-e 
+
+# File: /home/jobbe/Desktop/Projects/emlak-web/modules/image/image_processing.py
+"""Image processing functions for satellite and street view images."""
+
+import cv2
+import numpy as np
+import requests
+import streamlit as st
+from PIL import Image
+from io import BytesIO
+from streamlit_drawable_canvas import st_canvas
+
+def enhance_image(image, boost_factor=1.5, preserve_colors=True):
+    """Enhanced version of image processing"""
+    try:
+        if isinstance(image, Image.Image):
+            img_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+        else:
+            img_cv = image.copy()
+            
+        # Check if image is grayscale
+        is_grayscale = len(img_cv.shape) == 2 or (len(img_cv.shape) == 3 and img_cv.shape[2] == 1)
+        
+        # Convert to LAB color space for better color enhancement
+        if not is_grayscale:
+            lab = cv2.cvtColor(img_cv, cv2.COLOR_BGR2LAB)
+            l, a, b = cv2.split(lab)
+            
+            # Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
+            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+            l = clahe.apply(l)
+            
+            # Merge channels
+            lab = cv2.merge((l,a,b))
+            img_cv = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+        
+        # Apply denoising
+        img_cv = cv2.fastNlMeansDenoisingColored(img_cv, None, 10, 10, 7, 21)
+        
+        # Enhance sharpness
+        kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
+        img_cv = cv2.filter2D(img_cv, -1, kernel)
+        
+        # Boost saturation if needed
+        if boost_factor > 1.0:
+            hsv = cv2.cvtColor(img_cv, cv2.COLOR_BGR2HSV).astype("float32")
+            (h, s, v) = cv2.split(hsv)
+            s = np.clip(s * boost_factor, 0, 255)
+            v = np.clip(v * 1.1, 0, 255)  # Slight brightness boost
+            hsv = cv2.merge([h, s, v])
+            img_cv = cv2.cvtColor(hsv.astype("uint8"), cv2.COLOR_HSV2BGR)
+        
+        # Convert back to PIL Image
+        enhanced_pil = Image.fromarray(cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB))
+        return enhanced_pil
+    except Exception as e:
+        st.warning(f"Image enhancement failed: {e}")
+        return image
+
+def fetch_satellite_image(address=None, lat=None, lng=None, zoom=18, size="640x640", maptype="satellite"):
+    """
+    Fetch satellite image from Google Maps Static API.
+    
+    Args:
+        address: Address string (used if lat/lng not provided)
+        lat, lng: Coordinates (preferred over address if provided)
+        zoom: Zoom level (15-20)
+        size: Image size (width x height)
+        maptype: Map type (satellite, hybrid, roadmap)
+        
+    Returns:
+        PIL Image object or None if failed
+    """
+    if not st.session_state.get("GOOGLE_MAPS_API_KEY"):
+        st.error("Google Maps API key required!")
+        return None
+        
+    base_url = "https://maps.googleapis.com/maps/api/staticmap"
+    
+    if lat is not None and lng is not None:
+        location = f"{lat},{lng}"
+    else:
+        location = address
+        
+    params = {
+        "center": location,
+        "zoom": zoom,
+        "size": size,
+        "maptype": maptype,
+        "key": st.session_state["GOOGLE_MAPS_API_KEY"]
+    }
+    
+    try:
+        response = requests.get(base_url, params=params)
+        if response.status_code == 200:
+            img = Image.open(BytesIO(response.content))
+            enhance_colors = st.session_state.get('enhance_colors', True)
+            color_boost = st.session_state.get('color_boost', 1.5)
+            if enhance_colors:
+                img = enhance_image(img, color_boost, preserve_colors=True)
+            return img
+        else:
+            st.error(f"Failed to fetch satellite image: {response.status_code}")
+            return None
+    except Exception as e:
+        st.error(f"Error fetching satellite image: {str(e)}")
+        return None
+
+def fetch_street_view_image(address=None, lat=None, lng=None, size="640x640", fov=90, heading=0, pitch=0):
+    """
+    Fetch street view image from Google Street View API.
+    
+    Args:
+        address: Address string (used if lat/lng not provided)
+        lat, lng: Coordinates (preferred over address if provided)
+        size: Image size (width x height)
+        fov: Field of view (degrees)
+        heading: Camera heading (0-360)
+        pitch: Camera pitch (-90 to 90)
+        
+    Returns:
+        PIL Image object or None if failed
+    """
+    if not st.session_state.get("GOOGLE_MAPS_API_KEY"):
+        return None
+        
+    base_url = "https://maps.googleapis.com/maps/api/streetview"
+    
+    if lat is not None and lng is not None:
+        location = f"{lat},{lng}"
+    else:
+        location = address
+        
+    params = {
+        "location": location,
+        "size": size,
+        "fov": fov,
+        "heading": heading,
+        "pitch": pitch,
+        "key": st.session_state["GOOGLE_MAPS_API_KEY"]
+    }
+    
+    try:
+        response = requests.get(base_url, params=params)
+        if response.status_code == 200:
+            img = Image.open(BytesIO(response.content))
+            enhance_colors = st.session_state.get('enhance_colors', True)
+            color_boost = st.session_state.get('color_boost', 1.5)
+            if enhance_colors:
+                img = enhance_image(img, color_boost, preserve_colors=True)
+            return img
+        else:
+            return None
+    except Exception as e:
+        st.warning(f"Error fetching street view: {str(e)}")
+        return None
+
+def draw_property_border(image, color, width=3, border_ratio=0.2):
+    """
+    Draw a border on a property image.
+    
+    Args:
+        image: PIL Image object
+        color: Border color as hex string (#RRGGBB)
+        width: Border line width
+        border_ratio: Ratio of border inset from edges (0.0-0.5)
+    
+    Returns:
+        PIL Image with drawn border
+    """
+    img_array = np.array(image)
+    h, w = img_array.shape[:2]
+    
+    # Convert hex color to RGB
+    r = int(color[1:3], 16)
+    g = int(color[3:5], 16)
+    b = int(color[5:7], 16)
+    
+    # Draw rectangle (border_ratio inset from edges)
+    x1, y1 = int(w * border_ratio), int(h * border_ratio)
+    x2, y2 = int(w * (1 - border_ratio)), int(h * (1 - border_ratio))
+    
+    img_with_border = img_array.copy()
+    cv2.rectangle(img_with_border, (x1, y1), (x2, y2), (b, g, r), width)
+    
+    return Image.fromarray(img_with_border)
+-e 
+
+# File: /home/jobbe/Desktop/Projects/emlak-web/modules/image/enhance_integration.py
+"""Integration helpers for image enhancement workflows."""
+
+import streamlit as st
+from PIL import Image
+import os
+import tempfile
+
+# Import standard and deep enhancers
+from modules.image.image_processing import enhance_image
+from modules.image.deep_enhance import DeepImageEnhancer
+
+# Singleton enhancer instance
+_deep_enhancer = None
+
+def get_deep_enhancer():
+    """Get or create the deep enhancer singleton"""
+    global _deep_enhancer
+    if _deep_enhancer is None:
+        _deep_enhancer = DeepImageEnhancer()
+    return _deep_enhancer
+
+def smart_enhance_image(image, use_deep_enhance=False, boost_factor=1.5, 
+                       resolution_boost=True, denoise=True):
+    """
+    Smart image enhancement using either standard or deep learning methods
+    
+    Args:
+        image: PIL Image to enhance
+        use_deep_enhance: Whether to use deep learning enhancement
+        boost_factor: Color boost factor for standard enhancement
+        resolution_boost: Whether to boost resolution (deep enhance only)
+        denoise: Whether to apply denoising (deep enhance only)
+        
+    Returns:
+        Enhanced PIL Image
+    """
+    if use_deep_enhance:
+        # Use deep learning enhancement
+        enhancer = get_deep_enhancer()
+        return enhancer.enhance(
+            image, 
+            resolution_boost=resolution_boost,
+            remove_noise=denoise,
+            sharpen=True
+        )
+    else:
+        # Use standard enhancement
+        return enhance_image(image, boost_factor=boost_factor)
+
+def batch_enhance_images(images, progress_callback=None, **kwargs):
+    """
+    Enhance a batch of images with progress reporting
+    
+    Args:
+        images: List of PIL Images
+        progress_callback: Callback for reporting progress
+        **kwargs: Parameters for smart_enhance_image
+        
+    Returns:
+        List of enhanced PIL Images
+    """
+    enhanced_images = []
+    total = len(images)
+    
+    for i, img in enumerate(images):
+        if progress_callback:
+            progress_callback(i / total, f"Enhancing image {i+1}/{total}")
+            
+        enhanced = smart_enhance_image(img, **kwargs)
+        enhanced_images.append(enhanced)
+        
+    if progress_callback:
+        progress_callback(1.0, "Enhancement complete")
+        
+    return enhanced_images
+-e 
+
+# File: /home/jobbe/Desktop/Projects/emlak-web/modules/image/image_organizer.py
+"""Görüntü düzenleme ve yeniden sıralama araçları."""
+
+import streamlit as st
+from PIL import Image
+import numpy as np
+import base64
+import io
+import cv2  # Add missing import
+
+def reorder_images(images, order=None):
+    """
+    Görüntüleri belirtilen sıraya göre yeniden düzenler
+    
+    Args:
+        images: Görüntü listesi
+        order: Yeni sıralama dizisi (None ise mevcut sıra korunur)
+        
+    Returns:
+        Yeniden düzenlenmiş görüntü listesi
+    """
+    if order is None or len(order) != len(images):
+        return images
+    
+    return [images[i] for i in order]
+
+def display_draggable_images(images, key_prefix="img"):
+    """
+    Sürükle-bırak ile düzenlenebilir görüntü arayüzü gösterir
+    
+    Args:
+        images: Görüntü listesi
+        key_prefix: Görüntü elementleri için anahtar öneki
+        
+    Returns:
+        Yeni görüntü sırası
+    """
+    st.markdown("### Görüntüleri Düzenleyin")
+    st.info("Görüntüleri sürükleyip bırakarak sıralamayı değiştirebilirsiniz.")
+    
+    # Her görüntü için benzersiz bir id oluştur
+    img_ids = [f"{key_prefix}_{i}" for i in range(len(images))]
+    
+    # Görüntüleri grid halinde göster
+    cols = st.columns(3)
+    order = list(range(len(images)))
+    
+    # CSS for drag and drop
+    st.markdown("""
+    <style>
+    .draggable-img {
+        cursor: move;
+        border: 2px dashed transparent;
+        transition: transform 0.2s;
+        padding: 5px;
+    }
+    .draggable-img:hover {
+        border-color: #0078ff;
+        transform: scale(1.02);
+    }
+    </style>
+    """, unsafe_allow_html=True)
+    
+    # JavaScript for drag and drop
+    js = """
+    <script>
+    function setupDragDrop() {
+        const imageContainers = document.querySelectorAll('.draggable-img-container');
+        let draggedItem = null;
+        
+        imageContainers.forEach(container => {
+            container.addEventListener('dragstart', function() {
+                draggedItem = this;
+                setTimeout(() => this.style.opacity = '0.4', 0);
+            });
+            
+            container.addEventListener('dragend', function() {
+                this.style.opacity = '1';
+            });
+            
+            container.addEventListener('dragover', function(e) {
+                e.preventDefault();
+            });
+            
+            container.addEventListener('dragenter', function() {
+                this.style.border = '2px dashed #0078ff';
+            });
+            
+            container.addEventListener('dragleave', function() {
+                this.style.border = '2px dashed transparent';
+            });
+            
+            container.addEventListener('drop', function(e) {
+                e.preventDefault();
+                if (draggedItem !== this) {
+                    // Swap containers
+                    const allContainers = Array.from(document.querySelectorAll('.draggable-img-container'));
+                    const fromIndex = allContainers.indexOf(draggedItem);
+                    const toIndex = allContainers.indexOf(this);
+                    
+                    // Update new order in hidden input for Streamlit
+                    const orderInput = document.getElementById('img-order-data');
+                    let currentOrder = JSON.parse(orderInput.value);
+                    
+                    // Swap elements in order array
+                    const temp = currentOrder[fromIndex];
+                    currentOrder[fromIndex] = currentOrder[toIndex];
+                    currentOrder[toIndex] = temp;
+                    
+                    // Update the hidden input
+                    orderInput.value = JSON.stringify(currentOrder);
+                    
+                    // Visually swap elements
+                    const parentContainer = this.parentNode;
+                    const beforeElement = (fromIndex < toIndex) ? this.nextSibling : this;
+                    parentContainer.insertBefore(draggedItem, beforeElement);
+                    
+                    // Trigger order update event
+                    const event = new Event('orderUpdate');
+                    orderInput.dispatchEvent(event);
+                }
+                this.style.border = '2px dashed transparent';
+            });
+        });
+    }
+    
+    document.addEventListener('DOMContentLoaded', setupDragDrop);
+    </script>
+    """
+    
+    # Create hidden input to store order
+    order_data = st.empty()
+    
+    # Display images with drag and drop
+    for i, (img, img_id) in enumerate(zip(images, img_ids)):
+        with cols[i % 3]:
+            # Convert image to base64
+            buffered = io.BytesIO()
+            img.save(buffered, format="PNG")
+            img_str = base64.b64encode(buffered.getvalue()).decode()
+            
+            # HTML for draggable image
+            st.markdown(f"""
+            <div class="draggable-img-container" draggable="true" id="container-{img_id}">
+                <div class="draggable-img">
+                    <img src="data:image/png;base64,{img_str}" width="100%" />
+                    <p style="text-align:center;">Görüntü {i+1}</p>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+    
+    # Add JavaScript code at the end
+    st.markdown(js, unsafe_allow_html=True)
+    
+    # Return the current order
+    return order
+
+def create_image_arranger(images):
+    """
+    Streamlit için görüntü düzenleyici bileşen
+    
+    Args:
+        images: Düzenlenecek görüntü listesi
+        
+    Returns:
+        Düzenlenmiş görüntü listesi ve değişim bayrağı
+    """
+    st.subheader("Görüntüleri Düzenleyin")
+    
+    # Düzenleme türü seçimi
+    edit_mode = st.radio("Düzenleme Modu:", 
+                      ["Manuel Sıralama", "Otomatik Sıralama"],
+                      horizontal=True)
+    
+    if edit_mode == "Manuel Sıralama":
+        # Görüntüleri göster ve manuel düzenleme için arayüz sağla
+        image_order = display_draggable_images(images)
+        
+        # Sıralama butonları
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            if st.button("Önemli Olanları Öne Çıkar"):
+                # Büyük ve daha detaylı görüntüleri öne al
+                image_sizes = [img.width * img.height for img in images]
+                sorted_order = sorted(range(len(images)), key=lambda i: image_sizes[i], reverse=True)
+                return reorder_images(images, sorted_order), True
+        
+        with col2:
+            if st.button("Ufak Görüntüleri Sona Al"):
+                # Küçük görüntüleri sona al
+                image_sizes = [img.width * img.height for img in images]
+                sorted_order = sorted(range(len(images)), key=lambda i: image_sizes[i])
+                return reorder_images(images, sorted_order), True
+                
+        with col3:
+            if st.button("Orijinal Sıraya Döndür"):
+                return images, True
+    
+    elif edit_mode == "Otomatik Sıralama":
+        # Otomatik sıralama seçenekleri
+        sort_option = st.selectbox(
+            "Sıralama Kriteri:",
+            ["En Net Olanlar Önce", "En İyi Kompozisyonlar Önce", "En Renkli Olanlar Önce"]
+        )
+        
+        if st.button("Otomatik Sırala"):
+            if sort_option == "En Net Olanlar Önce":
+                # Görüntü netliğine göre sıralama (laplasyon filtresi)
+                clarity_scores = []
+                for img in images:
+                    img_array = np.array(img.convert('L'))  # Gri tonlama
+                    laplacian = cv2.Laplacian(img_array, cv2.CV_64F).var()
+                    clarity_scores.append(laplacian)
+                
+                sorted_order = sorted(range(len(images)), key=lambda i: clarity_scores[i], reverse=True)
+                return reorder_images(images, sorted_order), True
+                
+            elif sort_option == "En İyi Kompozisyonlar Önce":
+                # Kural üçte bir kompozisyonuna göre sıralama
+                composition_scores = []
+                for img in images:
+                    img_array = np.array(img)
+                    # Basit bir kompozisyon puanı hesapla
+                    h, w = img_array.shape[:2]
+                    center_region = img_array[h//4:3*h//4, w//4:3*w//4]
+                    center_std = np.std(center_region)
+                    composition_scores.append(center_std)
+                
+                sorted_order = sorted(range(len(images)), key=lambda i: composition_scores[i], reverse=True)
+                return reorder_images(images, sorted_order), True
+                
+            elif sort_option == "En Renkli Olanlar Önce":
+                # Renk doygunluğuna göre sıralama
+                saturation_scores = []
+                for img in images:
+                    img_hsv = np.array(img.convert('HSV'))
+                    saturation = np.mean(img_hsv[:, :, 1])
+                    saturation_scores.append(saturation)
+                
+                sorted_order = sorted(range(len(images)), key=lambda i: saturation_scores[i], reverse=True)
+                return reorder_images(images, sorted_order), True
+    
+    return images, False
+-e 
+
+# File: /home/jobbe/Desktop/Projects/emlak-web/modules/image/deep_enhance.py
+"""Deep learning based image enhancement for real estate photography."""
+
+import cv2
+import numpy as np
+from PIL import Image
+import streamlit as st
+import os
+import tempfile
+
+class DeepImageEnhancer:
+    """
+    Deep learning based image enhancement for real estate photography
+    """
+    
+    def __init__(self, use_gpu=None):
+        """
+        Initialize the enhancer
+        
+        Args:
+            use_gpu: Force GPU usage (None=auto-detect)
+        """
+        self.models_loaded = False
+        self.model_sr = None  # Super resolution model
+        self.model_denoise = None  # Denoising model
+        
+        # Auto-detect GPU
+        if use_gpu is None:
+            try:
+                import torch
+                self.use_gpu = torch.cuda.is_available()
+            except ImportError:
+                self.use_gpu = False
+        else:
+            self.use_gpu = use_gpu
+            
+        # Create model cache directory
+        self.cache_dir = os.path.join(tempfile.gettempdir(), "deep_enhance_models")
+        os.makedirs(self.cache_dir, exist_ok=True)
+        
+    def load_models(self):
+        """Load deep learning models"""
+        if self.models_loaded:
+            return True
+        
+        try:
+            # Try to load OpenCV's DNN Super Resolution model
+            self.model_sr = cv2.dnn_superres.DnnSuperResImpl_create()
+            
+            # Download model if not in cache
+            model_path = os.path.join(self.cache_dir, "ESPCN_x4.pb")
+            if not os.path.exists(model_path):
+                st.info("Downloading super-resolution model (first time only)...")
+                import urllib.request
+                urllib.request.urlretrieve(
+                    "https://github.com/opencv/opencv_contrib/raw/master/modules/dnn_superres/models/ESPCN_x4.pb",
+                    model_path
+                )
+            
+            # Load the model
+            self.model_sr.readModel(model_path)
+            self.model_sr.setModel("espcn", 4)  # 4x upscaling
+            
+            # Set up denoising parameters
+            self.models_loaded = True
+            return True
+            
+        except Exception as e:
+            st.warning(f"Could not load deep enhancement models: {e}")
+            return False
+    
+    def enhance(self, image, resolution_boost=True, remove_noise=True, sharpen=True):
+        """
+        Enhance an image using multiple deep learning techniques
+        
+        Args:
+            image: PIL Image or numpy array
+            resolution_boost: Whether to enhance resolution
+            remove_noise: Whether to remove noise
+            sharpen: Whether to apply sharpening
+            
+        Returns:
+            Enhanced PIL Image
+        """
+        # Convert to numpy array if PIL Image
+        if isinstance(image, Image.Image):
+            img = np.array(image)
+            if img.shape[2] == 4:  # Handle RGBA
+                img = cv2.cvtColor(img, cv2.COLOR_RGBA2RGB)
+        else:
+            img = image.copy()
+            if len(img.shape) == 2:  # Handle grayscale
+                img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+        
+        # Ensure image is in RGB format for processing
+        if img.shape[2] == 4:
+            img = cv2.cvtColor(img, cv2.COLOR_RGBA2RGB)
+            
+        # Get original size for later resizing
+        original_h, original_w = img.shape[:2]
+        
+        # 1. Apply denoising if requested
+        if remove_noise:
+            # Use non-local means denoising
+            img = cv2.fastNlMeansDenoisingColored(img, None, 10, 10, 7, 21)
+        
+        # 2. Apply super resolution if requested and models are loaded
+        if resolution_boost and self.load_models():
+            try:
+                # Resize image to a reasonable size for SR model (max 1MP)
+                max_mp = 1_000_000  # 1 megapixel
+                scale_factor = 1.0
+                
+                if original_w * original_h > max_mp:
+                    scale_factor = np.sqrt(max_mp / (original_w * original_h))
+                    img = cv2.resize(img, 
+                                    (int(original_w * scale_factor), 
+                                     int(original_h * scale_factor)), 
+                                    interpolation=cv2.INTER_AREA)
+                
+                # Apply super-resolution
+                img = self.model_sr.upsample(img)
+                
+                # Resize back to slightly larger than original
+                boost_factor = 1.2  # 20% resolution boost
+                target_w = int(original_w * boost_factor)
+                target_h = int(original_h * boost_factor)
+                img = cv2.resize(img, (target_w, target_h), interpolation=cv2.INTER_LANCZOS4)
+                
+            except Exception as e:
+                st.warning(f"Super-resolution failed, using standard processing: {e}")
+                # Fallback to standard processing
+                pass
+        
+        # 3. Apply sharpening if requested
+        if sharpen:
+            kernel = np.array([[-1, -1, -1],
+                              [-1, 9, -1],
+                              [-1, -1, -1]])
+            img = cv2.filter2D(img, -1, kernel)
+        
+        # 4. Convert back to PIL
+        return Image.fromarray(img)
+-e 
+
+# File: /home/jobbe/Desktop/Projects/emlak-web/modules/image/__init__.py
+-e 
+
+# File: /home/jobbe/Desktop/Projects/emlak-web/modules/geo/geo_utils.py
+"""Geographic utilities for address geocoding and nearby place search."""
+
+import streamlit as st
+import requests
+from utils.utils import calculate_distance  # Doğrudan import edilebilir modüller için
+
+def get_coordinates_from_address(address):
+    """
+    Get geographic coordinates from an address using Google Maps Geocoding API.
+    
+    Args:
+        address: String address to geocode
+        
+    Returns:
+        Tuple of (latitude, longitude, formatted_address) or (None, None, None) if failed
+    """
+    try:
+        if not st.session_state.get("GOOGLE_MAPS_API_KEY"):
+            st.error("Google Maps API key required!")
+            return None, None, None
+            
+        url = "https://maps.googleapis.com/maps/api/geocode/json"
+        params = {
+            "address": address,
+            "key": st.session_state["GOOGLE_MAPS_API_KEY"]
+        }
+        response = requests.get(url, params=params)
+        data = response.json()
+        
+        if data["status"] == "OK":
+            location = data["results"][0]["geometry"]["location"]
+            return location["lat"], location["lng"], data["results"][0]["formatted_address"]
+        else:
+            st.error(f"Geocoding error: {data['status']}")
+            return None, None, None
+    except Exception as e:
+        st.error(f"Error getting coordinates: {str(e)}")
+        return None, None, None
+
+def get_nearby_places(lat, lng, radius=1500, types=None):
+    """
+    Find nearby places of interest using Google Places API.
+    
+    Args:
+        lat, lng: Coordinates to search around
+        radius: Search radius in meters
+        types: Types of places to find
+        
+    Returns:
+        List of place dictionaries with name, type, distance, and rating
+    """
+    # Relatif import yerine doğrudan import kullanıyoruz
+    # Önceki: from utils.utils import calculate_distance
+    
+    if not st.session_state.get("GOOGLE_PLACES_API_KEY"):
+        return []
+    
+    try:
+        url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
+        params = {
+            "location": f"{lat},{lng}",
+            "radius": radius,
+            "key": st.session_state["GOOGLE_PLACES_API_KEY"]
+        }
+        
+        if types:
+            params["type"] = types
+            
+        response = requests.get(url, params=params)
+        data = response.json()
+        
+        places = []
+        if data["status"] == "OK":
+            for place in data["results"][:10]:  # Limit to top 10 places
+                places.append({
+                    "name": place.get("name", ""),
+                    "type": place.get("types", [""])[0],
+                    "distance": calculate_distance(lat, lng, 
+                                             place["geometry"]["location"]["lat"], 
+                                             place["geometry"]["location"]["lng"]),
+                    "rating": place.get("rating", 0)
+                })
+        return places
+    except Exception as e:
+        st.warning(f"Error fetching nearby places: {str(e)}")
+        return []
+-e 
+
+# File: /home/jobbe/Desktop/Projects/emlak-web/modules/geo/__init__.py
+-e 
+
+# File: /home/jobbe/Desktop/Projects/emlak-web/modules/audio/audio_generation.py
+"""Audio generation functions using ElevenLabs text-to-speech API."""
+
+import os
+import tempfile
+import streamlit as st
+import requests
+from moviepy.editor import AudioFileClip
+
+def generate_audio_from_text(text, voice_id):
+    """
+    Generate audio from text using ElevenLabs API.
+    
+    Args:
+        text: Text to convert to speech
+        voice_id: ElevenLabs voice ID
+        
+    Returns:
+        Path to the generated audio file or None if failed
+    """
+    if not st.session_state.get("ELEVENLABS_API_KEY"):
+        st.error("ElevenLabs API anahtarı gereklidir!")
+        return None
+            
+    try:
+        url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+        
+        headers = {
+            "Accept": "audio/mpeg",
+            "Content-Type": "application/json",
+            "xi-api-key": st.session_state["ELEVENLABS_API_KEY"]
+        }
+        
+        data = {
+            "text": text,
+            "model_id": "eleven_multilingual_v2",
+            "voice_settings": {
+                "stability": 0.5,
+                "similarity_boost": 0.75
+            }
+        }
+        
+        response = requests.post(url, json=data, headers=headers)
+        
+        if response.status_code == 200:
+            # Create temporary file
+            temp_dir = tempfile.mkdtemp()
+            audio_path = os.path.join(temp_dir, "emlak_seslendirme.mp3")
+            
+            with open(audio_path, "wb") as f:
+                f.write(response.content)
+            
+            return audio_path
+        else:
+            st.error(f"Ses oluşturma hatası: {response.status_code} - {response.text}")
+            return None
+    except Exception as e:
+        st.error(f"Ses oluşturma hatası: {str(e)}")
+        return None
+
+def get_audio_duration(audio_path):
+    """
+    Get the duration of an audio file in seconds.
+    
+    Args:
+        audio_path: Path to audio file
+        
+    Returns:
+        Duration in seconds
+    """
+    try:
+        audio_clip = AudioFileClip(audio_path)
+        duration = audio_clip.duration
+        audio_clip.close()
+        return duration
+    except Exception as e:
+        st.error(f"Error getting audio duration: {str(e)}")
+        return 0
+-e 
+
+# File: /home/jobbe/Desktop/Projects/emlak-web/modules/audio/__init__.py
+-e 
+
+# File: /home/jobbe/Desktop/Projects/emlak-web/modules/audio/music_library.py
+"""Music library and audio mixing utilities."""
+
+import os
+import tempfile
+import requests
+import streamlit as st
+from pydub import AudioSegment
+from pathlib import Path
+import shutil
+
+# Base directory for local music files
+BASE_DIR = Path(__file__).parent.parent.parent
+MUSIC_DIR = BASE_DIR / "static" / "music"
+os.makedirs(MUSIC_DIR, exist_ok=True)
+
+# Copy default music files from sample_music to music directory if they don't exist
+def initialize_music_library():
+    """Initialize music library by using local music files."""
+    sample_dir = BASE_DIR / "static" / "sample_music"
+    os.makedirs(sample_dir, exist_ok=True)
+    
+    # Define sample music files - these should be placed in the sample_music directory
+    sample_files = {
+        "elegant": "elegant_corporate.mp3",
+        "inspiring": "inspiring_ambient.mp3", 
+        "modern": "modern_corporate.mp3",
+        "relaxing": "relaxing_ambient.mp3",
+        "nature": "nature_sounds.mp3"
+    }
+    
+    # Create simple empty sample files if they don't exist
+    for key, filename in sample_files.items():
+        sample_path = sample_dir / filename
+        dest_path = MUSIC_DIR / filename
+        
+        # Copy if source exists and destination doesn't
+        if not dest_path.exists():
+            if sample_path.exists():
+                shutil.copy2(sample_path, dest_path)
+                st.info(f"Müzik dosyası kopyalandı: {filename}")
+            else:
+                # Create a simple silent MP3 as a placeholder
+                create_silent_audio(dest_path)
+                st.info(f"Örnek müzik dosyası oluşturuldu: {filename}")
+
+def create_silent_audio(filepath, duration=10):
+    """Create a silent audio file."""
+    try:
+        silent = AudioSegment.silent(duration=duration * 1000)  # duration in milliseconds
+        silent.export(filepath, format="mp3")
+    except Exception as e:
+        st.warning(f"Ses dosyası oluşturma hatası: {str(e)}")
+
+# Voice options dictionary
+MUSIC_OPTIONS = {
+    "elegant": "Elegant Corporate",
+    "inspiring": "İlham Verici",
+    "modern": "Modern Kurumsal",
+    "relaxing": "Rahatlatıcı", 
+    "nature": "Doğa Sesleri",
+    "custom": "Kendi Müziğiniz",
+    "no_music": "Müzik Yok"
+}
+
+def get_music_options():
+    """
+    Get available music options for background music.
+    
+    Returns:
+        Dictionary with music options
+    """
+    return MUSIC_OPTIONS
+
+def download_music(music_type):
+    """
+    Get the path to the music file.
+    
+    Args:
+        music_type: Music type key from MUSIC_OPTIONS
+        
+    Returns:
+        Path to music file or None if failed
+    """
+    if music_type not in MUSIC_OPTIONS or music_type in ["custom", "no_music"]:
+        return None
+        
+    filename = f"{music_type}_music.mp3"
+    # Map the key to actual filename based on our naming convention
+    if music_type == "elegant":
+        filename = "elegant_corporate.mp3"
+    elif music_type == "inspiring":
+        filename = "inspiring_ambient.mp3"
+    elif music_type == "modern":
+        filename = "modern_corporate.mp3"
+    elif music_type == "relaxing":
+        filename = "relaxing_ambient.mp3"
+    elif music_type == "nature":
+        filename = "nature_sounds.mp3"
+    
+    file_path = MUSIC_DIR / filename
+    
+    # If the file doesn't exist locally, create a simple silent file
+    if not file_path.exists():
+        try:
+            create_silent_audio(file_path)
+            st.info(f"Müzik dosyası oluşturuldu: {filename}")
+        except Exception as e:
+            st.error(f"Müzik dosyası hazırlanamadı: {str(e)}")
+            return None
+    
+    return str(file_path)
+
+def mix_audio(voice_path, music_path, music_volume=0.2):
+    """
+    Mix voice narration with background music.
+    
+    Args:
+        voice_path: Path to voice audio file
+        music_path: Path to music audio file
+        music_volume: Music volume level (0.0-1.0)
+        
+    Returns:
+        Path to mixed audio file or None if failed
+    """
+    try:
+        # Load audio files
+        voice = AudioSegment.from_file(voice_path)
+        music = AudioSegment.from_file(music_path)
+        
+        # Adjust music volume
+        music = music - (10 - int(music_volume * 10))  # Adjust volume level
+        
+        # Loop music to match voice duration if needed
+        voice_duration_ms = len(voice)
+        music_duration_ms = len(music)
+        
+        if voice_duration_ms > music_duration_ms:
+            # Loop music to match voice length
+            repeats = int(voice_duration_ms / music_duration_ms) + 1
+            music = music * repeats
+        
+        # Trim music to voice length
+        music = music[:voice_duration_ms]
+        
+        # Mix voice and music
+        mixed = voice.overlay(music)
+        
+        # Save mixed audio
+        temp_dir = tempfile.mkdtemp()
+        output_path = os.path.join(temp_dir, "mixed_audio.mp3")
+        mixed.export(output_path, format="mp3")
+        
+        return output_path
+    except Exception as e:
+        st.error(f"Ses karıştırma hatası: {str(e)}")
+        return None
+
+# Initialize music library at module import time
+initialize_music_library()
+-e 
+
+# File: /home/jobbe/Desktop/Projects/emlak-web/modules/__init__.py
+-e 
+
+# File: /home/jobbe/Desktop/Projects/emlak-web/modules/text/text_generation.py
+"""Text generation functions using Google's Gemini model."""
+
+import streamlit as st
+import google.generativeai as genai
+
+def generate_property_description(property_data, nearby_places=None):
+    """
+    Generate a property description using Gemini API.
+    
+    Args:
+        property_data: Dictionary with property information
+        nearby_places: List of nearby places of interest
+        
+    Returns:
+        Generated property description or None if failed
+    """
+    if not st.session_state.get("GEMINI_API_KEY"):
+        st.error("Gemini API anahtarı gereklidir!")
+        return None
+    
+    try:
+        # Configure Gemini API
+        genai.configure(api_key=st.session_state["GEMINI_API_KEY"])
+        model = genai.GenerativeModel('gemini-1.5-pro-latest')
+        
+        nearby_text = ""
+        if nearby_places and len(nearby_places) > 0:
+            nearby_text = "Yakın çevrede bulunan önemli noktalar:\n"
+            for place in sorted(nearby_places, key=lambda x: x['distance'])[:7]:  # Sort by distance and limit
+                nearby_text += f"- {place['name']} ({place['type'].replace('_', ' ')}) - {place['distance']} metre\n"
+        
+        prompt = f"""
+        Aşağıdaki bilgilere dayanarak Türkçe dilinde bir emlak ilanı metni oluştur.
+        Metin profesyonel, çekici ve bilgilendirici olmalıdır.
+        Metin normal bir hızda okunduğunda yaklaşık 45-60 saniye sürmeli (maksimum 600 karakter).
+        
+        Adres: {property_data['address']}
+        Emlak Tipi: {property_data['property_type']}
+        Oda Sayısı: {property_data['rooms']}
+        Banyo Sayısı: {property_data['bathrooms']}
+        Alan: {property_data['area']} m²
+        Fiyat: {property_data['price']:,} TL
+        Yapım Yılı: {property_data['year_built']}
+        Özel Özellikler: {property_data['special_features']}
+        
+        {nearby_text}
+        
+        Mevcut Açıklama: {property_data['description']}
+        
+        Çevredeki alanlardan, konum avantajlarından ve emlağın değerini artıran özelliklerden bahset.
+        Lütfen sadece metni döndür, başka açıklama ekleme.
+        """
+        
+        response = model.generate_content(prompt)
+        return response.text.strip()
+    except Exception as e:
+        st.error(f"Metin oluşturma hatası: {str(e)}")
+        return None
+-e 
+
+# File: /home/jobbe/Desktop/Projects/emlak-web/modules/text/__init__.py
+-e 
+
+# File: /home/jobbe/Desktop/Projects/emlak-web/modules/video/advanced_stabilization.py
+"""Advanced video stabilization techniques for smoother real estate videos."""
+
+import cv2
+import numpy as np
+import streamlit as st
+
+def stabilize_video_sequence(frames, smoothing_window=30):
+    """
+    Apply advanced stabilization to a sequence of frames
+    
+    Args:
+        frames: List of frames to stabilize
+        smoothing_window: Smoothing window size for trajectory
+    
+    Returns:
+        List of stabilized frames
+    """
+    n_frames = len(frames)
+    if n_frames < 3:
+        return frames  # Not enough frames to stabilize
+        
+    # Get frame dimensions
+    h, w = frames[0].shape[:2]
+    
+    # Pre-allocate trajectory and smoothed trajectory arrays
+    trajectory = np.zeros((n_frames-1, 3), np.float32)  # dx, dy, da (angle)
+    
+    # Track feature points across frames
+    prev_gray = cv2.cvtColor(frames[0], cv2.COLOR_BGR2GRAY)
+    prev_pts = cv2.goodFeaturesToTrack(prev_gray, maxCorners=200, qualityLevel=0.01, minDistance=30, blockSize=3)
+    
+    if prev_pts is None or len(prev_pts) < 10:
+        return frames  # Not enough feature points
+        
+    # Progress indicator
+    progress_placeholder = st.empty()
+    
+    # Calculate frame-to-frame transformations
+    for i in range(1, n_frames):
+        curr_gray = cv2.cvtColor(frames[i], cv2.COLOR_BGR2GRAY)
+        
+        # Update progress
+        if i % 5 == 0:
+            progress_placeholder.text(f"Stabilizing frames: {i}/{n_frames}")
+            
+        # Calculate optical flow
+        curr_pts, status, _ = cv2.calcOpticalFlowPyrLK(prev_gray, curr_gray, prev_pts, None)
+        
+        # Filter only valid points
+        idx = np.where(status == 1)[0]
+        if len(idx) < 10:  # Not enough matching points
+            prev_gray = curr_gray.copy()
+            prev_pts = cv2.goodFeaturesToTrack(prev_gray, maxCorners=200, qualityLevel=0.01, minDistance=30, blockSize=3)
+            continue
+            
+        prev_pts_valid = prev_pts[idx].reshape(-1, 2)
+        curr_pts_valid = curr_pts[idx].reshape(-1, 2)
+        
+        # Estimate rigid transformation
+        m = cv2.estimateAffinePartial2D(prev_pts_valid, curr_pts_valid)[0]
+        
+        if m is None:  # Transformation estimation failed
+            trajectory[i-1] = trajectory[i-2] if i > 1 else np.zeros(3)
+        else:
+            # Extract translation and rotation
+            dx = m[0, 2]
+            dy = m[1, 2]
+            da = np.arctan2(m[1, 0], m[0, 0])
+            trajectory[i-1] = [dx, dy, da]
+        
+        # Update for next iteration
+        prev_gray = curr_gray.copy()
+        prev_pts = curr_pts_valid.reshape(-1, 1, 2)
+    
+    # Smooth trajectory
+    smoothed_trajectory = smooth_trajectory(trajectory, smoothing_window)
+    
+    # Calculate difference
+    difference = smoothed_trajectory - trajectory
+    
+    # Apply transformation
+    stabilized_frames = []
+    stabilized_frames.append(frames[0])  # First frame remains unchanged
+    
+    for i in range(1, n_frames):
+        # Get transformation matrix
+        dx, dy, da = difference[i-1]
+        
+        # Create transformation matrix
+        m = np.zeros((2, 3), np.float32)
+        m[0, 0] = np.cos(da)
+        m[0, 1] = -np.sin(da)
+        m[1, 0] = np.sin(da)
+        m[1, 1] = np.cos(da)
+        m[0, 2] = dx
+        m[1, 2] = dy
+        
+        # Apply transformation
+        frame_stabilized = cv2.warpAffine(frames[i], m, (w, h), borderMode=cv2.BORDER_REFLECT)
+        stabilized_frames.append(frame_stabilized)
+        
+        # Update progress
+        if i % 5 == 0:
+            progress_placeholder.text(f"Applying stabilization: {i}/{n_frames}")
+    
+    progress_placeholder.empty()
+    return stabilized_frames
+
+def smooth_trajectory(trajectory, window_size):
+    """
+    Smooth trajectory using moving average
+    
+    Args:
+        trajectory: Array of trajectory vectors
+        window_size: Window size for smoothing
+    
+    Returns:
+        Smoothed trajectory array
+    """
+    smoothed = np.copy(trajectory)
+    
+    # Handle edge cases for small trajectories
+    if len(trajectory) <= window_size:
+        return smoothed
+        
+    # Apply moving average
+    for i in range(len(trajectory)):
+        start = max(0, i - window_size // 2)
+        end = min(len(trajectory), i + window_size // 2 + 1)
+        
+        # Calculate average in window
+        smoothed[i] = np.mean(trajectory[start:end], axis=0)
+    
+    return smoothed
+-e 
+
+# File: /home/jobbe/Desktop/Projects/emlak-web/modules/video/video_generation.py
+"""Video generation and effects functions.""" 
+
+import os
+import tempfile
+import cv2
+import numpy as np
+import streamlit as st
+from PIL import Image
+import traceback
+import gc
+from moviepy.editor import ImageSequenceClip, AudioFileClip, VideoFileClip
+import time
+
+# Import new modules - ensure they exist
+try:
+    from modules.video.advanced_stabilization import stabilize_video_sequence
+except ImportError:
+    # Fallback if module doesn't exist
+    def stabilize_video_sequence(frames, smoothing_window=30):
+        return frames
+
+def update_progress(progress_callback, percentage, message):
+    """Safely update progress with valid percentage"""
+    if progress_callback:
+        # Ensure percentage is between 0-1
+        safe_percentage = max(0.0, min(1.0, percentage))
+        progress_callback(safe_percentage, message)
+        print(f"Progress: {message} ({safe_percentage:.1%})")
+
+def create_frame_effect(image, n_frames, effect_type="zoom", zoom_in=True, pan_direction="right"):
+    """Create effect frames for a single image"""
+    img_array = np.array(image)
+    h, w = img_array.shape[:2]
+    frames = []
+    
+    if effect_type == "zoom":
+        # Use smooth easing function for zoom
+        zoom_range = np.array([1 - np.cos(x * np.pi / 2) for x in np.linspace(0, 1, n_frames)])
+        zoom_range = 1.0 + (0.3 if zoom_in else -0.3) * zoom_range
+        
+        for factor in zoom_range:
+            new_h, new_w = int(h / factor), int(w / factor)
+            y1, x1 = (h - new_h) // 2, (w - new_w) // 2
+            y2, x2 = y1 + new_h, x1 + new_w
+            
+            if 0 <= y1 < y2 <= h and 0 <= x1 < x2 <= w:
+                # Apply Gaussian blur for smoother transitions
+                cropped = img_array[y1:y2, x1:x2]
+                if factor != 1.0:
+                    blur_size = int(max(1, min(3, abs(1-factor) * 5)))
+                    cropped = cv2.GaussianBlur(cropped, (blur_size*2+1, blur_size*2+1), 0)
+                frame = cv2.resize(cropped, (w, h), interpolation=cv2.INTER_LANCZOS4)
+                frames.append(frame)
+    
+    elif effect_type == "pan":
+        # Use smooth easing for pan effect
+        max_shift = w // 4 if pan_direction in ["right", "left"] else h // 4
+        shifts = np.array([1 - np.cos(x * np.pi / 2) for x in np.linspace(0, 1, n_frames)])
+        shifts = shifts * max_shift
+        
+        if pan_direction in ["right", "down"]:
+            shifts = shifts[::-1]
+            
+        for shift in shifts:
+            shift = int(shift)
+            # Create translation matrix
+            if pan_direction in ["right", "left"]:
+                M = np.float32([[1, 0, -shift], [0, 1, 0]])
+            else:
+                M = np.float32([[1, 0, 0], [0, 1, -shift]])
+                
+            # Apply perspective transform for more natural movement
+            frame = cv2.warpAffine(img_array, M, (w, h), 
+                                 flags=cv2.INTER_LANCZOS4,
+                                 borderMode=cv2.BORDER_REFLECT)
+            frames.append(frame)
+    
+    # Apply stabilization if needed
+    if len(frames) > 2:
+        stabilized_frames = []
+        prev_frame = frames[0]
+        for frame in frames[1:]:
+            # Calculate and apply minimal stabilization
+            try:
+                orb = cv2.ORB_create()
+                kp1, des1 = orb.detectAndCompute(prev_frame, None)
+                kp2, des2 = orb.detectAndCompute(frame, None)
+                
+                if des1 is not None and des2 is not None:
+                    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+                    matches = bf.match(des1, des2)
+                    
+                    if matches:
+                        src_pts = np.float32([kp1[m.queryIdx].pt for m in matches]).reshape(-1, 1, 2)
+                        dst_pts = np.float32([kp2[m.trainIdx].pt for m in matches]).reshape(-1, 1, 2)
+                        
+                        M, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+                        if M is not None:
+                            frame = cv2.warpPerspective(frame, M, (w, h))
+            except Exception:
+                pass  # Fall back to original frame if stabilization fails
+                
+            stabilized_frames.append(frame)
+            prev_frame = frame
+        
+        frames = [frames[0]] + stabilized_frames
+    
+    return frames
+
+def apply_cinematic_effects(frames, effect_type="cinematic"):
+    """
+    Apply cinematic color grading and visual effects
+    
+    Args:
+        frames: List of frames
+        effect_type: Type of cinematic effect (cinematic, warm, cool, vintage)
+        
+    Returns:
+        List of processed frames
+    """
+    processed_frames = []
+    
+    # Define color grading LUTs for different styles
+    lut_intensity = 0.7  # Intensity of effect (0-1)
+    
+    for frame in frames:
+        if effect_type == "warm":
+            # Warm cinematic look
+            frame_lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+            l, a, b = cv2.split(frame_lab)
+            # Boost red/yellow tones
+            a = cv2.add(a, 10)
+            b = cv2.add(b, 15)
+            frame_lab = cv2.merge([l, a, b])
+            frame = cv2.cvtColor(frame_lab, cv2.COLOR_LAB2BGR)
+            
+            # Add slight vignette
+            frame = apply_vignette(frame, 0.3)
+            
+        elif effect_type == "cool":
+            # Cool cinematic look
+            frame_lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+            l, a, b = cv2.split(frame_lab)
+            # Boost cool tones
+            a = cv2.subtract(a, 10)
+            b = cv2.subtract(b, 10)
+            frame_lab = cv2.merge([l, a, b])
+            frame = cv2.cvtColor(frame_lab, cv2.COLOR_LAB2BGR)
+            
+        elif effect_type == "vintage":
+            # Vintage look
+            frame = apply_vintage_effect(frame)
+            
+        else:  # Default cinematic
+            # Standard cinematic grade (slight contrast boost, richer shadows)
+            frame = apply_cinematic_grade(frame)
+            
+        processed_frames.append(frame)
+        
+    return processed_frames
+
+def apply_vignette(image, intensity=0.5):
+    """Apply a vignette effect to an image"""
+    height, width = image.shape[:2]
+    
+    # Create a radial gradient mask
+    x = np.linspace(-1, 1, width)
+    y = np.linspace(-1, 1, height)
+    x_grid, y_grid = np.meshgrid(x, y)
+    
+    # Calculate radial distance from center
+    radius = np.sqrt(x_grid**2 + y_grid**2)
+    
+    # Create vignette mask
+    mask = 1 - np.clip(radius - 0.5, 0, 1) * intensity * 1.5
+    mask = mask.reshape(height, width, 1)
+    
+    # Apply mask to image
+    vignette = image * mask
+    
+    return vignette.astype(np.uint8)
+
+def apply_cinematic_grade(image):
+    """Apply basic cinematic color grading"""
+    # Convert to float for processing
+    img_float = image.astype(np.float32) / 255.0
+    
+    # Lift shadows slightly
+    shadows = 0.05
+    img_float = img_float * (1 - shadows) + shadows
+    
+    # Increase contrast with S-curve
+    img_float = 0.5 + 1.2 * (img_float - 0.5)
+    
+    # Boost saturation slightly
+    hsv = cv2.cvtColor(np.clip(img_float, 0, 1).astype(np.float32), cv2.COLOR_BGR2HSV)
+    h, s, v = cv2.split(hsv)
+    s = s * 1.1  # Boost saturation by 10%
+    s = np.clip(s, 0, 1)
+    hsv = cv2.merge([h, s, v])
+    
+    # Convert back to BGR
+    img_graded = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+    
+    # Convert back to uint8
+    img_graded = np.clip(img_graded * 255, 0, 255).astype(np.uint8)
+    
+    return img_graded
+
+def apply_vintage_effect(image):
+    """Apply a vintage film effect"""
+    # Create sepia tone effect
+    sepia = np.array([[0.393, 0.769, 0.189],
+                     [0.349, 0.686, 0.168],
+                     [0.272, 0.534, 0.131]])
+                     
+    # Apply sepia transformation
+    sepia_img = cv2.transform(image, sepia)
+    
+    # Add noise to simulate film grain
+    noise = np.random.normal(0, 5, image.shape).astype(np.uint8)
+    vintage = cv2.add(sepia_img, noise)
+    
+    # Add slight vignette
+    vintage = apply_vignette(vintage, 0.4)
+    
+    return vintage
+
+def optimize_image_for_video(image, target_width, target_height):
+    """
+    Optimize an image for video processing to reduce memory usage
+    
+    Args:
+        image: PIL Image
+        target_width: Desired width
+        target_height: Desired height
+        
+    Returns:
+        Optimized numpy array in BGR format
+    """
+    try:
+        # Convert PIL to numpy if needed
+        if isinstance(image, Image.Image):
+            # Resize image to target dimensions
+            image = image.resize((target_width, target_height), Image.LANCZOS)
+            
+            # Convert to RGB if in another mode
+            if image.mode != 'RGB':
+                image = image.convert('RGB')
+                
+            # Convert to numpy array
+            img_array = np.array(image)
+            
+            # Convert RGB to BGR for OpenCV
+            img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+        else:
+            # Already numpy array, just resize
+            img_array = cv2.resize(image, (target_width, target_height))
+            
+            # Ensure BGR format
+            if len(img_array.shape) == 3 and img_array.shape[2] == 4:
+                img_array = cv2.cvtColor(img_array, cv2.COLOR_RGBA2BGR)
+            elif len(img_array.shape) == 2:
+                img_array = cv2.cvtColor(img_array, cv2.COLOR_GRAY2BGR)
+        
+        return img_array
+    except Exception as e:
+        print(f"Image optimization error: {e}")
+        traceback.print_exc()
+        
+        # Fallback: create a blank image with text
+        blank = np.ones((target_height, target_width, 3), dtype=np.uint8) * 128
+        cv2.putText(blank, "Image Error", (50, target_height//2), 
+                  cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+        return blank
+
+def generate_video(images, audio_path, transition_type, fps, quality, temp_dir, final_path, progress_callback=None):
+    """Generate video with progress tracking"""
+    try:
+        if progress_callback:
+            progress_callback(0.01, "Video oluşturma başlatılıyor...")
+            
+        # Create temporary working directory
+        work_dir = os.path.join(temp_dir, f'video_work_{time.strftime("%Y%m%d-%H%M%S")}')
+        os.makedirs(work_dir, exist_ok=True)
+        
+        # Process images
+        if progress_callback:
+            progress_callback(0.1, "Görüntüler işleniyor...")
+            
+        processed_images = []
+        for i, img in enumerate(images):
+            temp_img_path = os.path.join(work_dir, f'frame_{i}.jpg')
+            img.save(temp_img_path)
+            processed_images.append(temp_img_path)
+            if progress_callback:
+                progress_callback(0.1 + (0.4 * (i/len(images))), f"Görüntü {i+1}/{len(images)} işleniyor...")
+        
+        # Generate video
+        if progress_callback:
+            progress_callback(0.5, "Video oluşturuluyor...")
+            
+        
+        
+    except Exception as e:
+        if progress_callback:
+            progress_callback(0, f"Hata: {str(e)}")
+        raise e
+
+def generate_video_with_ffmpeg(images, audio_path, fps=30, quality="normal", progress_callback=None):
+    """
+    Fallback method to generate video using FFmpeg directly via moviepy
+    
+    Args:
+        images: List of PIL images
+        audio_path: Path to audio file
+        fps: Frames per second
+        quality: Video quality (normal/high)
+        progress_callback: Callback for progress reporting
+        
+    Returns:
+        Path to generated video
+    """
+    from moviepy.editor import ImageSequenceClip, AudioFileClip
+    import tempfile
+    import os
+    import numpy as np
+    
+    # Progress tracking
+    progress_text = st.empty()
+    progress_bar = st.progress(0.20)  # Start at 20%
+    
+    def update_progress(percent, message):
+        if progress_callback:
+            progress_callback(percent, message)
+        progress_bar.progress(percent)
+        progress_text.text(message)
+    
+    # Create temp directory
+    temp_dir = tempfile.mkdtemp()
+    final_path = os.path.join(temp_dir, "final_video.mp4")
+    
+    # Convert all images to numpy arrays
+    if quality == "high":
+        target_size = (1920, 1080)
+        bitrate = "4000k"
+    else:
+        target_size = (1280, 720)
+        bitrate = "2000k"
+    
+    # Process images
+    update_progress(0.30, "Görüntüler hazırlanıyor... (30%)")
+    
+    # Process images with better memory management
+    frames = []
+    for i, img in enumerate(images):
+        # Update progress: 30% to 60% for image processing
+        current_progress = 0.30 + (0.30 * (i / len(images)))
+        remaining_percent = 100 - int(current_progress * 100)
+        update_progress(
+            current_progress, 
+            f"Görüntü hazırlanıyor {i+1}/{len(images)}... (Kalan: %{remaining_percent})"
+        )
+        
+        try:
+            if isinstance(img, Image.Image):
+                img = img.resize(target_size, Image.LANCZOS)
+                img_array = np.array(img.convert('RGB'))
+                frames.append(img_array)
+            else:
+                # Already numpy array
+                img_array = cv2.resize(img, target_size)
+                if len(img_array.shape) == 2:
+                    img_array = cv2.cvtColor(img_array, cv2.COLOR_GRAY2RGB)
+                elif img_array.shape[2] == 4:
+                    img_array = cv2.cvtColor(img_array, cv2.COLOR_RGBA2RGB)
+                frames.append(img_array)
+                
+            # Force memory cleanup after each image
+            if i % 2 == 0:
+                optimize_memory_usage()
+                
+        except Exception as e:
+            print(f"Error processing image {i}: {str(e)}")
+            # Continue with next image
+    
+    # Create video clip
+    update_progress(0.60, "Video klip hazırlanıyor... (60%)")
+    clip = ImageSequenceClip(frames, fps=fps)
+    
+    # Add audio
+    update_progress(0.70, "Ses ekleniyor... (70%)")
+    
+    # Check audio file existence
+    if not os.path.exists(audio_path):
+        update_progress(0.70, "Ses dosyası bulunamadı! Sessiz video oluşturuluyor...")
+        # Create a silent video
+        silent_path = os.path.join(temp_dir, "silent.mp4")
+        clip.write_videofile(
+            silent_path,
+            codec="libx264",
+            audio_codec=None,
+            bitrate=bitrate,
+            fps=fps,
+            threads=2,
+            logger=None
+        )
+        return silent_path
+    
+    audio = AudioFileClip(audio_path)
+    clip = clip.set_audio(audio)
+    
+    # Write video file with explicit parameters
+    update_progress(0.80, "Video oluşturuluyor ve kaydediliyor... (80%)")
+    
+    # Capture potential moviepy errors
+    try:
+        clip.write_videofile(
+            final_path,
+            codec="libx264",
+            audio_codec="aac",
+            bitrate=bitrate,
+            fps=fps,
+            threads=2,
+            logger=None  # Suppress moviepy output
+        )
+    except Exception as e:
+        print(f"MoviePy write error: {str(e)}")
+        
+        # Try with more conservative settings
+        update_progress(0.85, "Alternatif video oluşturma yöntemi deneniyor...")
+        try:
+            clip.write_videofile(
+                final_path,
+                codec="libx264",
+                audio_codec="aac",
+                bitrate="1000k",
+                fps=24,
+                threads=1,
+                logger=None
+            )
+        except Exception as e2:
+            print(f"Second MoviePy write error: {str(e2)}")
+            raise
+    
+    update_progress(1.0, "Tamamlandı! (100%)")
+    
+    # Clean up
+    try:
+        clip.close()
+        audio.close()
+    except:
+        pass
+    
+    return final_path
+
+def optimize_memory_usage():
+    """Force garbage collection and free memory"""
+    import gc
+    import sys
+    
+    # Force garbage collection
+    collected = gc.collect()
+    
+    # Try to release more memory if on Linux
+    if sys.platform.startswith('linux'):
+        try:
+            # Use malloc_trim to release memory back to OS
+            import ctypes
+            ctypes.CDLL('libc.so.6').malloc_trim(0)
+        except:
+            pass
+    
+    return collected
+-e 
+
+# File: /home/jobbe/Desktop/Projects/emlak-web/modules/video/preview_utils.py
+"""Utilities for generating video previews."""
+
+import streamlit as st
+import tempfile
+import os
+from PIL import Image
+import numpy as np
+import io
+import base64
+
+def create_gif_preview(images, duration=500, max_size=(400, 300)):
+    """
+    Create a GIF preview from a list of images.
+    
+    Args:
+        images: List of PIL images
+        duration: Milliseconds per frame
+        max_size: Maximum dimensions (width, height)
+        
+    Returns:
+        Path to generated GIF file
+    """
+    try:
+        # Resize images to consistent size
+        resized_images = []
+        for img in images:
+            # Make a copy to avoid modifying original
+            img_copy = img.copy()
+            img_copy.thumbnail(max_size, Image.LANCZOS)
+            resized_images.append(img_copy)
+        
+        # Create temporary file
+        temp_dir = tempfile.mkdtemp()
+        gif_path = os.path.join(temp_dir, "preview.gif")
+        
+        # Save as GIF
+        resized_images[0].save(
+            gif_path,
+            save_all=True,
+            append_images=resized_images[1:],
+            optimize=True,
+            duration=duration,
+            loop=0
+        )
+        
+        return gif_path
+    except Exception as e:
+        st.error(f"GIF önizleme oluşturma hatası: {str(e)}")
+        return None
+
+def show_video_preview(images, audio_path=None):
+    """
+    Show a preview of what the video will look like.
+    
+    Args:
+        images: List of images to include in the preview
+        audio_path: Optional path to audio file
+    """
+    st.subheader("Video Önizleme")
+    
+    # Create tabs for different preview options
+    preview_tab, images_tab = st.tabs(["Animasyon Önizleme", "Tüm Görüntüler"])
+    
+    with preview_tab:
+        col1, col2 = st.columns([3, 1])
+        
+        with col1:
+            if len(images) > 1:
+                # Create and display GIF preview
+                gif_path = create_gif_preview(images[:min(8, len(images))])
+                if gif_path:
+                    st.image(gif_path, use_container_width=True)
+                    st.caption("Animasyon örneği (gerçek video daha yüksek kalitede olacak)")
+            else:
+                st.image(images[0], use_container_width=True)
+                st.caption("Önizleme için en az 2 görüntü gereklidir")
+        
+        with col2:
+            st.write("**Video İçeriği:**")
+            st.write(f"- {len(images)} görüntü")
+            if audio_path:
+                st.write("- Sesli anlatım")
+                st.audio(audio_path)
+            
+            transition_type = st.session_state.get('transition_type', 'Yakınlaşma')
+            st.write(f"- Geçiş efekti: {transition_type}")
+            
+            quality = "1080p" if st.session_state.get('video_quality') == "high" else "720p"
+            st.write(f"- Çözünürlük: {quality}")
+    
+    with images_tab:
+        # Show all images in a grid
+        cols = st.columns(4)
+        for i, img in enumerate(images):
+            with cols[i % 4]:
+                st.image(img, caption=f"Görüntü {i+1}", use_container_width=True)
+-e 
+
+# File: /home/jobbe/Desktop/Projects/emlak-web/modules/video/__init__.py
+-e 
+
+# File: /home/jobbe/Desktop/Projects/emlak-web/modules/video/overlay_tools.py
+"""Video overlay tools for adding text, logos and watermarks."""
+
+import cv2
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
+import streamlit as st
+import os
+import tempfile
+
+def add_text_overlay(image, text, position="bottom", font_size=24, color=(255, 255, 255), 
+                    bg_opacity=0.5, padding=10, font_path=None):
+    """
+    Görüntüye metin ekler
+    
+    Args:
+        image: PIL görüntüsü
+        text: Eklenecek metin
+        position: Metin konumu ("top", "bottom", "top-left", etc.)
+        font_size: Yazı tipi boyutu
+        color: RGB olarak yazı rengi
+        bg_opacity: Arka plan opaklığı (0-1)
+        padding: Metin etrafındaki dolgu miktarı
+        font_path: Özel yazı tipi dosya yolu (None ise varsayılan)
+        
+    Returns:
+        Metin eklenmiş PIL görüntüsü
+    """
+    # Orijinal görüntü boyutları
+    img = image.copy()
+    width, height = img.size
+    draw = ImageDraw.Draw(img)
+    
+    # Yazı tipini ayarla
+    try:
+        if font_path and os.path.exists(font_path):
+            font = ImageFont.truetype(font_path, font_size)
+        else:
+            # Varsayılan yazı tipi
+            font = ImageFont.load_default()
+            font_size = 16  # Varsayılan yazı tipi için küçült
+    except Exception as e:
+        st.warning(f"Yazı tipi yüklenemedi, varsayılan kullanılıyor: {str(e)}")
+        font = ImageFont.load_default()
+        font_size = 16
+    
+    # Metin boyutunu hesapla
+    text_width, text_height = draw.textsize(text, font=font) if hasattr(draw, 'textsize') else (font_size * len(text) * 0.6, font_size * 1.5)
+    
+    # Metin konumunu belirle
+    if position == "top":
+        text_position = ((width - text_width) / 2, padding)
+    elif position == "bottom":
+        text_position = ((width - text_width) / 2, height - text_height - padding)
+    elif position == "top-left":
+        text_position = (padding, padding)
+    elif position == "top-right":
+        text_position = (width - text_width - padding, padding)
+    elif position == "bottom-left":
+        text_position = (padding, height - text_height - padding)
+    elif position == "bottom-right":
+        text_position = (width - text_width - padding, height - text_height - padding)
+    elif position == "center":
+        text_position = ((width - text_width) / 2, (height - text_height) / 2)
+    else:
+        text_position = ((width - text_width) / 2, height - text_height - padding)
+    
+    # Saydam arka plan oluştur
+    overlay = Image.new('RGBA', img.size, (0, 0, 0, 0))
+    overlay_draw = ImageDraw.Draw(overlay)
+    
+    # Metin arka planı çiz
+    bg_color = (0, 0, 0, int(255 * bg_opacity))
+    overlay_draw.rectangle(
+        [
+            text_position[0] - padding, 
+            text_position[1] - padding,
+            text_position[0] + text_width + padding,
+            text_position[1] + text_height + padding
+        ],
+        fill=bg_color
+    )
+    
+    # Metni çiz
+    if hasattr(overlay_draw, 'text'):
+        overlay_draw.text(text_position, text, font=font, fill=color)
+    
+    # Orijinal görüntüye arka planı ve metni birleştir
+    img = Image.alpha_composite(img.convert('RGBA'), overlay)
+    
+    return img.convert('RGB')
+
+def add_logo_overlay(image, logo_image, position="bottom-right", size_percent=15, padding=10,
+                    opacity=0.8):
+    """
+    Görüntüye logo ekler
+    
+    Args:
+        image: PIL görüntüsü
+        logo_image: Logo PIL görüntüsü
+        position: Logo konumu
+        size_percent: Görüntü boyutunun yüzdesi olarak logo boyutu
+        padding: Logo kenarları ile görüntü kenarı arasındaki dolgu
+        opacity: Logo opaklığı (0-1)
+        
+    Returns:
+        Logo eklenmiş PIL görüntüsü
+    """
+    # Orijinal görüntü ve logo boyutları
+    img = image.copy()
+    width, height = img.size
+    logo = logo_image.copy()
+    
+    # Logo boyutunu ayarla
+    logo_width = int(width * size_percent / 100)
+    logo_height = int(logo.height * logo_width / logo.width)
+    logo = logo.resize((logo_width, logo_height), Image.LANCZOS)
+    
+    # Logo konumunu belirle
+    if position == "top-left":
+        logo_position = (padding, padding)
+    elif position == "top-right":
+        logo_position = (width - logo_width - padding, padding)
+    elif position == "bottom-left":
+        logo_position = (padding, height - logo_height - padding)
+    elif position == "bottom-right":
+        logo_position = (width - logo_width - padding, height - logo_height - padding)
+    elif position == "center":
+        logo_position = ((width - logo_width) / 2, (height - logo_height) / 2)
+    else:
+        logo_position = (width - logo_width - padding, height - logo_height - padding)
+    
+    # Logo opaklığını ayarla
+    if logo.mode != 'RGBA':
+        logo = logo.convert('RGBA')
+    
+    # RGBA kanallarını ayır
+    r, g, b, a = logo.split()
+    
+    # Alfa kanalını opaklık ile çarp
+    a = a.point(lambda x: x * opacity)
+    
+    # Kanalları yeniden birleştir
+    logo = Image.merge('RGBA', (r, g, b, a))
+    
+    # Orijinal görüntüye logoyu ekle
+    img_with_logo = img.copy().convert('RGBA')
+    img_with_logo.paste(logo, (int(logo_position[0]), int(logo_position[1])), logo)
+    
+    return img_with_logo.convert('RGB')
+
+def apply_overlays_to_video_frames(frames, text=None, text_options=None, logo=None, logo_options=None):
+    """
+    Video karelerine metin ve/veya logo ekler
+    
+    Args:
+        frames: İşlenecek video kareleri listesi
+        text: Eklenecek metin (None ise metin eklenmez)
+        text_options: Metin ekleme seçenekleri sözlüğü
+        logo: Logo görüntüsü (None ise logo eklenmez)
+        logo_options: Logo ekleme seçenekleri sözlüğü
+        
+    Returns:
+        Düzenlenmiş video kareleri listesi
+    """
+    if text is None and logo is None:
+        return frames
+        
+    processed_frames = []
+    
+    for frame in frames:
+        # NumPy dizisini PIL görüntüsüne dönüştür
+        pil_frame = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        
+        # Metin ekle
+        if text is not None:
+            text_opts = text_options or {}
+            pil_frame = add_text_overlay(pil_frame, text, **text_opts)
+        
+        # Logo ekle
+        if logo is not None:
+            logo_opts = logo_options or {}
+            pil_frame = add_logo_overlay(pil_frame, logo, **logo_opts)
+        
+        # PIL görüntüsünü NumPy dizisine geri dönüştür
+        processed_frame = cv2.cvtColor(np.array(pil_frame), cv2.COLOR_RGB2BGR)
+        processed_frames.append(processed_frame)
+    
+    return processed_frames
+-e 
+
+# File: /home/jobbe/Desktop/Projects/emlak-web/combined_code.py
+-e 
+
+# File: /home/jobbe/Desktop/Projects/emlak-web/app.py
+# IMPORTANT: This must be the first Streamlit command in the app
+import streamlit as st
+
+st.set_page_config(
+    page_title="Sanal Drone Emlak Video Oluşturucu",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+"""Emlak Video Oluşturucu - Ana Uygulama"""
+
+from PIL import Image
+import gc
+import os
+import folium
+import time
+import sys
+from pathlib import Path
+
+# Add the project root to path to fix imports
+project_root = Path(__file__).parent
+if str(project_root) not in sys.path:
+    sys.path.append(str(project_root))
+
+# Import local modules
+from config.config import (
+    initialize_session_state,
+    VOICE_OPTIONS,
+    DEFAULT_VOICE,
+    VIDEO_DIR,
+)
+from modules.text.text_generation import generate_property_description
+from modules.audio.audio_generation import generate_audio_from_text, get_audio_duration
+from modules.image.image_processing import (
+    fetch_satellite_image,
+    fetch_street_view_image,
+    draw_property_border,
+    enhance_image,
+)
+from modules.video.video_generation import generate_video
+from modules.geo.geo_utils import get_coordinates_from_address, get_nearby_places
+from utils.utils import calculate_distance, cleanup_temp_files
+from streamlit_folium import st_folium
+
+# Yeni durum yönetimi ve arka plan görevleri modüllerini içe aktar
+from utils.state_manager import StateManager
+from utils.background_tasks import BackgroundTaskManager, generate_video_in_background
+
+# Add missing imports
+import cv2
+import numpy as np
+import tempfile
+
+# Import overlay and music functions
+from modules.video.overlay_tools import add_text_overlay, add_logo_overlay
+from modules.audio.music_library import get_music_options, mix_audio, download_music
+from utils.cache_utils import cached_data, clear_cache, clear_disk_cache
+
+# Add at the top with other imports:
+from utils.system_check import display_system_info
+from modules.video.preview_utils import show_video_preview
+
+# Fix the rerun function usage
+from streamlit import runtime
+from streamlit.runtime.scriptrunner import get_script_run_ctx
+
+# Add at the top with other imports
+import os
+from pathlib import Path
+
+# Add after other constants
+TEMP_DIR = os.path.join(os.path.dirname(__file__), 'temp')
+STORAGE_DIR = os.path.join(os.path.dirname(__file__), 'storage')
+
+# Create directories if they don't exist
+os.makedirs(TEMP_DIR, exist_ok=True)
+os.makedirs(STORAGE_DIR, exist_ok=True)
+
+def safe_rerun():
+    """Safely rerun the app"""
+    try:
+        st.rerun()
+    except:
+        # Fallback for very old Streamlit versions
+        try:
+            st.experimental_rerun()
+        except:
+            st.warning("Could not rerun the app. Please refresh the page manually.")
+
+
+# Ana uygulama sınıfı
+class EmlakVideoApp:
+    def __init__(self):
+        # Uygulama başlangıç ayarları
+        self.initialize_app()
+
+        # Durum yöneticisi ve arka plan görev yöneticisi oluştur
+        self.state_manager = StateManager()
+        self.task_manager = BackgroundTaskManager()
+
+    def initialize_app(self):
+        """Uygulamayı başlat ve gerekli dizinleri oluştur"""
+        initialize_session_state()
+        # st.set_page_config was moved to the top of the file
+
+    def run(self):
+        """Ana uygulama akışını çalıştır"""
+        # Başlık ve sidebar'ı ayarla
+        self.setup_header()
+        self.setup_sidebar()
+
+        # Emlak adres girişi (ana ekranda her zaman görünür)
+        self.setup_address_input()
+
+        # Arka plan görevlerini kontrol et ve görüntüle
+        self.check_background_tasks()
+
+        # Ana sekmeleri oluştur
+        if "current_view" not in st.session_state:
+            st.session_state["current_view"] = "tabs"  # Varsayılan görünüm: tabs
+
+        if st.session_state["current_view"] == "tabs":
+            self.show_tabbed_interface()
+        else:
+            # Alternatif olarak wizard arayüzü eklenebilir
+            self.show_wizard_interface()
+
+    def setup_header(self):
+        """Uygulama başlığını ve üst bilgiyi ayarla"""
+        st.title("🏠 Sanal Drone Emlak Video Oluşturucu")
+
+        # Proje yönetimi butonları
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            if st.button("💾 Projeyi Kaydet"):
+                self.save_project()
+
+        with col2:
+            if st.button("📂 Projeyi Aç"):
+                self.load_project()
+
+        with col3:
+            if st.button("🧹 Önbelleği Temizle"):
+                self.clear_cache()
+
+    def setup_sidebar(self):
+        """Kenar çubuğu ayarlarını oluştur"""
+        with st.sidebar:
+            st.header("Video Ayarları")
+
+            # Görünüm seçimi
+            st.session_state["current_view"] = st.radio(
+                "Arayüz Görünümü",
+                options=["tabs"],
+                format_func=lambda x: "Sekmeli Görünüm"
+                
+            )
+
+            # Video ayarları
+            st.session_state["fps"] = st.slider(
+                "Kare Hızı (FPS)", 15, 60, 30, help="Saniyedeki kare sayısı"
+            )
+            st.session_state["video_quality"] = st.radio(
+                "Video Kalitesi",
+                ["normal", "high"],
+                format_func=lambda x: "Normal (720p)"
+                if x == "normal"
+                else "Yüksek (1080p)",
+            )
+            st.session_state["transition_type"] = st.selectbox(
+                "Geçiş Efekti", ["Yakınlaşma", "Kaydırma", "Yakınlaşma ve Kaydırma"]
+            )
+
+            # Görüntü iyileştirme ayarları
+            st.session_state["enhance_colors"] = st.checkbox(
+                "Görüntü Renklerini Geliştir", value=True
+            )
+            st.session_state["color_boost"] = st.slider("Renk Canlılığı", 1.0, 2.5, 1.5)
+
+            # Şablonlar menüsü
+            self.show_templates()
+
+    def show_templates(self):
+        """Hazır şablonları göster ve uygula"""
+        st.subheader("📋 Hazır Şablonlar")
+
+        templates = {
+            "Lüks Konut": {
+                "transition_type": "Yakınlaşma ve Kaydırma",
+                "fps": 30,
+                "video_quality": "high",
+                "color_boost": 1.8,
+                "description": "Yüksek kaliteli, akıcı geçişlerle lüks konut videoları için ideal ayarlar.",
+            },
+            "Ticari Emlak": {
+                "transition_type": "Kaydırma",
+                "fps": 24,
+                "video_quality": "high",
+                "color_boost": 1.3,
+                "description": "Ticari mülkler için profesyonel görünümlü, yüksek kalitede sunumlar.",
+            },
+            "Ekonomik Paket": {
+                "transition_type": "Yakınlaşma",
+                "fps": 24,
+                "video_quality": "normal",
+                "color_boost": 1.5,
+                "description": "Hızlı ve verimli oluşturma için optimize edilmiş temel ayarlar.",
+            },
+            "Arsa/Arazi": {
+                "transition_type": "Yakınlaşma ve Kaydırma",
+                "fps": 30,
+                "video_quality": "high",
+                "color_boost": 2.0,
+                "description": "Arsa ve arazi görüntülerini vurgulamak için uyarlanmış, canlı renkli ayarlar.",
+            },
+            "Deniz Manzaralı": {
+                "transition_type": "Kaydırma",
+                "fps": 30,
+                "video_quality": "high",
+                "color_boost": 1.7,
+                "description": "Deniz ve göl manzaralarını öne çıkaran, mavi tonları vurgulayan ayarlar.",
+            },
+        }
+
+        selected_template = st.selectbox(
+            "Şablon Seç:", ["Özel"] + list(templates.keys())
+        )
+
+        if selected_template != "Özel":
+            # Seçilen şablonun açıklamasını göster
+            st.info(templates[selected_template]["description"])
+
+            if st.button(f"'{selected_template}' Şablonunu Uygula"):
+                # Seçilen şablonu uygula
+                template = templates[selected_template]
+                for key, value in template.items():
+                    if key != "description":  # Açıklama hariç diğer özellikleri ayarla
+                        st.session_state[key] = value
+                st.success(f"'{selected_template}' şablonu uygulandı!")
+                safe_rerun()
+
+    def setup_address_input(self):
+        """Emlak adres girişi alanını oluştur"""
+        st.header("📍 Emlak Konumu")
+        address = st.text_input(
+            "Emlak adresi:",
+            placeholder="Örnek: Atatürk Mah. Cumhuriyet Cad. No:123, İstanbul",
+        )
+
+        if address:
+            # Konum verilerini al
+            with st.spinner("Adres bilgileri alınıyor..."):
+                lat, lng, formatted_address = get_coordinates_from_address(address)
+                if lat and lng:
+                    st.session_state["property_location"] = {
+                        "lat": lat,
+                        "lng": lng,
+                        "formatted_address": formatted_address,
+                    }
+                    st.success(f"Konum bulundu: {formatted_address}")
+
+                    # Harita oluştur ve göster
+                    m = folium.Map(location=[lat, lng], zoom_start=15)
+                    folium.Marker([lat, lng], tooltip="Emlak Konumu").add_to(m)
+                    st_folium(m, width=800, height=300)
+                else:
+                    st.error("Adres bulunamadı. Lütfen geçerli bir adres girin.")
+
+    def check_background_tasks(self):
+        """Devam eden arka plan görevlerini kontrol et ve görüntüle"""
+        # Tamamlanmış eski görevleri temizle
+        self.task_manager.cleanup_completed_tasks(max_age_seconds=1800)  # 30 dakika
+
+        # Video oluşturma görevi varsa kontrol et
+        if "video_task_id" in st.session_state:
+            task_id = st.session_state["video_task_id"]
+            task_status = self.task_manager.get_task_status(task_id)
+
+            if task_status:
+                # Devam eden görev varsa, durumunu göster
+                if task_status["status"] in [
+                    "starting",
+                    "running",
+                    "preparing",
+                    "processing_images",
+                    "generating_video",
+                ]:
+                    st.header("🎬 Video Oluşturuluyor")
+                    st.info(f"Video oluşturma işlemi devam ediyor...")
+
+                    # Calculate stage name in Turkish
+                    stage_name = {
+                        "starting": "Başlatılıyor",
+                        "running": "Çalışıyor",
+                        "preparing": "Hazırlanıyor",
+                        "processing_images": "Görüntüler İşleniyor",
+                        "generating_video": "Video Oluşturuluyor",
+                    }.get(task_status["status"], task_status["status"])
+
+                    col1, col2 = st.columns([3, 1])
+
+                    with col1:
+                        progress = task_status["progress"] / 100.0
+                        progress_bar = st.progress(progress)
+                        st.caption(f"İşlem: {stage_name}")
+
+                    with col2:
+                        st.metric("Tamamlandı", f"%{int(progress * 100)}")
+
+                    if "message" in task_status and task_status["message"]:
+                        st.caption(f"Detay: {task_status['message']}")
+
+                    # Her 2 saniyede bir yenile
+                    time.sleep(2)
+                    safe_rerun()
+
+                # Tamamlanan görev varsa, sonucu göster
+                elif task_status["status"] == "completed":
+                    video_path = task_status["result"]
+                    if video_path and os.path.exists(video_path):
+                        st.header("🎉 Video Hazır!")
+                        st.success("Video başarıyla oluşturuldu!")
+
+                        # Video dosya bilgileri
+                        video_size_mb = os.path.getsize(video_path) / (1024 * 1024)
+                        video_info = f"Video boyutu: {video_size_mb:.1f} MB"
+                        st.info(video_info)
+
+                        # Videoyu göster
+                        st.video(video_path)
+
+                        # İndirme butonu
+                        with open(video_path, "rb") as file:
+                            st.download_button(
+                                "📥 Videoyu İndir",
+                                data=file,
+                                file_name="emlak_videosu.mp4",
+                                mime="video/mp4",
+                                help="Videoyu cihazınıza kaydedin",
+                            )
+
+                    # İşlem tamamlandığı için görev ID'sini temizle
+                    del st.session_state["video_task_id"]
+
+                # Hata durumunda göster
+                elif task_status["status"] == "failed":
+                    st.header("❌ Video Oluşturma Hatası")
+                    st.error(
+                        f"Video oluşturulurken bir hata meydana geldi: {task_status['error']}"
+                    )
+
+                    # Hata detayı
+                    with st.expander("Hata Detayları"):
+                        if "error_details" in task_status:
+                            st.code(task_status["error_details"])
+                        else:
+                            st.write("Detaylı hata bilgisi mevcut değil.")
+
+                    # Yeniden deneme butonu
+                    if st.button(
+                        "🔄 Yeniden Dene", help="Video oluşturmayı tekrar deneyin"
+                    ):
+                        del st.session_state["video_task_id"]
+                        safe_rerun()
+
+                    del st.session_state["video_task_id"]
+
+    def save_project(self):
+        """Projeyi kaydet diyalog kutusu"""
+        with st.form(key="save_project_form"):
+            project_name = st.text_input("Proje adı:", max_chars=50)
+            overwrite = st.checkbox("Aynı isimli proje varsa üzerine yaz")
+
+            submit_button = st.form_submit_button(label="Kaydet")
+
+            if submit_button:
+                if not project_name:
+                    st.error("Proje adı boş olamaz!")
+                    return
+
+                # Proje verilerini al
+                project_data = self.state_manager.get_project_data()
+
+                # Projeyi kaydet
+                success = self.state_manager.save_project(
+                    project_name, project_data, overwrite
+                )
+
+                if success:
+                    st.success(f"Proje '{project_name}' başarıyla kaydedildi!")
+                else:
+                    st.error(
+                        f"Proje '{project_name}' kaydedilemedi. Aynı isimli bir proje zaten mevcut."
+                    )
+
+    def load_project(self):
+        """Projeyi aç diyalog kutusu"""
+        with st.form(key="load_project_form"):
+            project_name = st.text_input("Açılacak proje adı:", max_chars=50)
+
+            submit_button = st.form_submit_button(label="Aç")
+
+            if submit_button:
+                if not project_name:
+                    st.error("Proje adı boş olamaz!")
+                    return
+
+                # Projeyi yükle
+                project_data = self.state_manager.load_project(project_name)
+
+                if project_data:
+                    self.state_manager.set_project_data(project_data)
+                    st.success(f"Proje '{project_name}' başarıyla yüklendi!")
+                    safe_rerun()
+                else:
+                    st.error(f"Proje '{project_name}' bulunamadı.")
+
+    def clear_cache(self):
+        """Önbelleği temizle"""
+        from utils.cache_utils import clear_cache as cc
+
+        cc()  # Streamlit önbelleği temizler
+
+        # Disk önbelleğini temizle
+        from utils.cache_utils import clear_disk_cache
+
+        clear_disk_cache()
+
+        # Geçici dosyaları temizle
+        cleanup_temp_files(None)
+        st.success("Önbellek başarıyla temizlendi!")
+
+    def show_tabbed_interface(self):
+        """Sekme tabanlı arayüzü göster"""
+        tabs = st.tabs(
+            [
+                "1. Emlak Bilgileri",
+                "2. Sesli Anlatım",
+                "3. Görüntüler",
+                "4. Video Oluştur",
+            ]
+        )
+
+        # Her sekme için ilgili controller'ı çağır
+        with tabs[0]:
+            property_controller = PropertyController()
+            property_controller.show_property_form()
+
+        with tabs[1]:
+            audio_controller = AudioController()
+            audio_controller.show_audio_generation()
+
+        with tabs[2]:
+            image_controller = ImageController()
+            image_controller.show_image_collection()
+
+        with tabs[3]:
+            video_controller = VideoController(self.task_manager)
+            video_controller.show_video_generation()
+
+    def show_wizard_interface(self):
+        """Adım adım sihirbaz arayüzünü göster (ileride uygulanabilir)"""
+        wizard = PropertyVideoWizard()
+        wizard.show()
+
+
+# Controller sınıfları - Her biri uygulamanın bir yönünü kontrol eder
+class PropertyController:
+    """Emlak detayları ve metin oluşturma için controller"""
+
+    def show_property_form(self):
+        st.header("Emlak Bilgileri")
+        if "property_location" not in st.session_state:
+            st.warning("Lütfen önce emlak adresini girin!")
+            return
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            property_type = st.selectbox(
+                "Emlak Tipi:",
+                ["Daire", "Villa", "Müstakil Ev", "Arsa", "Ticari", "Diğer"],
+            )
+            rooms = st.number_input("Oda Sayısı:", min_value=0, max_value=20, value=3)
+            bathrooms = st.number_input(
+                "Banyo Sayısı:", min_value=0, max_value=10, value=1
+            )
+
+        with col2:
+            area = st.number_input("Metrekare:", min_value=1, value=120)
+            price = st.number_input("Fiyat (TL):", min_value=0, value=1500000)
+            year_built = st.number_input(
+                "Yapım Yılı:", min_value=1900, max_value=2025, value=2010
+            )
+
+        special_features = st.text_area(
+            "Özel Özellikler:",
+            placeholder="Örnek: Deniz manzarası, yüzme havuzu, güvenlik, otopark vb.",
+            height=100,
+        )
+
+        # Çevre bilgilerini getir
+        nearby_places = self._get_nearby_info()
+
+        # Metin oluştur butonu
+        if st.button("Emlak Metni Oluştur", type="primary"):
+            self._generate_description(
+                property_type,
+                rooms,
+                bathrooms,
+                area,
+                price,
+                year_built,
+                special_features,
+                nearby_places,
+            )
+
+    def _get_nearby_info(self):
+        """Yakın çevre bilgilerini getir"""
+        include_nearby = st.checkbox("Yakın Çevre Bilgilerini Ekle", value=True)
+        nearby_places = None
+
+        if include_nearby:
+            nearby_radius = st.slider(
+                "Araştırma Yarıçapı (metre)", 500, 2000, 1000, 100
+            )
+            with st.spinner("Yakın çevre analizi yapılıyor..."):
+                nearby_places = get_nearby_places(
+                    st.session_state["property_location"]["lat"],
+                    st.session_state["property_location"]["lng"],
+                    radius=nearby_radius,
+                    types=[
+                        "school,hospital,shopping_mall,park,restaurant,subway_station,bus_station"
+                    ],
+                )
+
+                if nearby_places:
+                    with st.expander("Yakındaki Önemli Noktalar"):
+                        for place in sorted(nearby_places, key=lambda x: x["distance"]):
+                            st.write(
+                                f"🏢 **{place['name']}** ({place['type'].replace('_', ' ')}) - {place['distance']}m"
+                            )
+
+        return nearby_places
+
+    def _generate_description(
+        self,
+        property_type,
+        rooms,
+        bathrooms,
+        area,
+        price,
+        year_built,
+        special_features,
+        nearby_places,
+    ):
+        """Emlak açıklama metni oluştur"""
+        with st.spinner("Metin oluşturuluyor..."):
+            property_data = {
+                "address": st.session_state["property_location"]["formatted_address"],
+                "property_type": property_type,
+                "rooms": rooms,
+                "bathrooms": bathrooms,
+                "area": area,
+                "price": price,
+                "year_built": year_built,
+                "special_features": special_features,
+                "description": "",
+            }
+
+            generated_text = generate_property_description(
+                property_data, nearby_places if nearby_places else None
+            )
+
+            if generated_text:
+                st.session_state["property_text"] = generated_text
+                st.success("Metin başarıyla oluşturuldu!")
+                st.markdown("### Oluşturulan Metin:")
+                st.write(generated_text)
+
+                edited_text = st.text_area(
+                    "Metni Düzenleyin (isteğe bağlı):", value=generated_text, height=200
+                )
+
+                if edited_text != generated_text:
+                    st.session_state["property_text"] = edited_text
+
+
+class AudioController:
+    """Ses oluşturma ve yönetimi için controller"""
+
+    def show_audio_generation(self):
+        st.header("Sesli Anlatım Oluştur")
+
+        if "property_text" not in st.session_state:
+            st.warning("Lütfen önce emlak bilgilerini girin!")
+            return
+
+        st.write(st.session_state["property_text"])
+
+        # Ses seçenekleri eklenebilir
+        voice_id = st.selectbox(
+            "Ses Seçin:",
+            options=list(VOICE_OPTIONS.keys()),
+            format_func=lambda x: VOICE_OPTIONS[x],
+            index=list(VOICE_OPTIONS.keys()).index(DEFAULT_VOICE),
+        )
+        st.session_state["voice_id"] = voice_id
+
+        if st.button("Sesli Anlatım Oluştur"):
+            self._generate_audio()
+
+    def _generate_audio(self):
+        """Metinden ses oluştur"""
+        audio_path = generate_audio_from_text(
+            st.session_state["property_text"],
+            st.session_state.get("voice_id", DEFAULT_VOICE),
+        )
+
+        if audio_path:
+            st.session_state["audio_path"] = audio_path
+            st.session_state["audio_duration"] = get_audio_duration(audio_path)
+            st.success("Sesli anlatım başarıyla oluşturuldu!")
+            st.audio(audio_path)
+
+
+class ImageController:
+    """Görüntü toplama ve işleme için controller"""
+
+    def show_image_collection(self):
+        st.header("Görüntüleri Topla")
+
+        if "property_location" not in st.session_state:
+            st.warning("Lütfen önce emlak adresini girin!")
+            return
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            self._show_map_images()
+
+        with col2:
+            self._show_custom_images()
+
+    def _show_map_images(self):
+        """Harita ve uydu görüntülerini göster"""
+        st.subheader("Harita Görüntüleri")
+
+        zoom_level = st.slider("Yakınlaştırma Seviyesi", 15, 20, 18)
+        map_type = st.selectbox(
+            "Harita Tipi",
+            ["satellite", "hybrid", "roadmap"],
+            format_func=lambda x: {
+                "satellite": "Uydu",
+                "hybrid": "Hibrit",
+                "roadmap": "Yol Haritası",
+            }[x],
+        )
+
+        if st.button("Harita Görüntülerini Getir"):
+            self._fetch_map_images(zoom_level, map_type)
+
+        # Emlak sınırı çizme özelliği
+        if (
+            "maps_images" in st.session_state
+            and len(st.session_state["maps_images"]) > 0
+        ):
+            self._show_border_drawing()
+
+    def _fetch_map_images(self, zoom_level, map_type):
+        """Harita görüntülerini getir"""
+        with st.spinner("Görüntüler alınıyor..."):
+            lat = st.session_state["property_location"]["lat"]
+            lng = st.session_state["property_location"]["lng"]
+
+            # Uydu görüntülerini al
+            satellite_images = []
+            progress_bar = st.progress(0)
+
+            main_img = fetch_satellite_image(
+                lat=lat, lng=lng, zoom=zoom_level, maptype=map_type
+            )
+            if main_img:
+                # Renk iyileştirmeyi uygula
+                if st.session_state["enhance_colors"]:
+                    main_img = enhance_image(
+                        main_img, boost_factor=st.session_state["color_boost"]
+                    )
+                satellite_images.append(main_img)
+
+                # Farklı zoom seviyelerindeki görüntüler
+                zoom_levels = [zoom_level - 1, zoom_level - 2, zoom_level + 1]
+                for i, zoom in enumerate(zoom_levels):
+                    img = fetch_satellite_image(
+                        lat=lat, lng=lng, zoom=zoom, maptype=map_type
+                    )
+                    if img:
+                        # Renk iyileştirmeyi uygula
+                        if st.session_state["enhance_colors"]:
+                            img = enhance_image(
+                                img, boost_factor=st.session_state["color_boost"]
+                            )
+                        satellite_images.append(img)
+                    progress_bar.progress((i + 1) / len(zoom_levels))
+
+            # Sokak görüntülerini al
+            headings = [0, 90, 180, 270]
+            street_view_images = []
+
+            for heading in headings:
+                img = fetch_street_view_image(lat=lat, lng=lng, heading=heading)
+                if img:
+                    street_view_images.append(img)
+
+            # Tüm görüntüleri birleştir
+            all_images = satellite_images + street_view_images
+            if all_images:
+                st.session_state["maps_images"] = all_images
+                st.success(f"{len(all_images)} görüntü başarıyla alındı!")
+
+                # Görüntüleri grid içinde göster
+                cols = st.columns(3)
+                for idx, img in enumerate(all_images):
+                    with cols[idx % 3]:
+                        st.image(img, caption=f"Görüntü {idx + 1}")
+
+    def _show_border_drawing(self):
+        """Emlak sınırı çizme arayüzünü göster"""
+        st.subheader("Emlak Sınırı Çizme")
+        st.info(
+            "Uydu görüntüsü üzerinde emlak sınırını belirlemek için aşağıdaki ayarları kullanın."
+        )
+
+        # Sınır çizilecek görüntüyü seç
+        image_options = [
+            f"Görüntü {i + 1}" for i in range(len(st.session_state["maps_images"]))
+        ]
+        selected_img_idx = st.selectbox(
+            "Sınır çizilecek görüntüyü seçin:",
+            range(len(image_options)),
+            format_func=lambda i: image_options[i],
+        )
+
+        selected_image = st.session_state["maps_images"][selected_img_idx]
+
+        # Seçili görüntüyü göster
+        st.image(selected_image, caption="Seçilen Görüntü", use_container_width=True)
+
+        # Sınır ayarları
+        col_color, col_width, col_ratio = st.columns(3)
+
+        with col_color:
+            border_colors = {
+                "#FF0000": "Kırmızı",
+                "#00FF00": "Yeşil",
+                "#0000FF": "Mavi",
+                "#FFFF00": "Sarı",
+                "#FF00FF": "Mor",
+                "#00FFFF": "Turkuaz",
+            }
+            color_key = st.selectbox(
+                "Sınır Rengi:",
+                list(border_colors.keys()),
+                format_func=lambda x: border_colors[x],
+            )
+
+        with col_width:
+            border_width = st.slider("Sınır Kalınlığı:", 1, 10, 3)
+
+        with col_ratio:
+            border_ratio = st.slider(
+                "Sınır Konumu:",
+                0.05,
+                0.45,
+                0.2,
+                help="0.5'e yakın değerler sınırı merkeze, 0'a yakın değerler kenarlara yaklaştırır",
+            )
+
+        # Sınırı çiz butonu
+        if st.button("Sınırı Çiz", type="primary"):
+            with st.spinner("Sınır çiziliyor..."):
+                bordered_image = draw_property_border(
+                    selected_image, color_key, border_width, border_ratio
+                )
+
+                # Session state'te sakla
+                st.session_state["bordered_property_image"] = bordered_image
+
+                # Sonucu göster
+                st.success("Sınır başarıyla çizildi!")
+                st.image(
+                    bordered_image,
+                    caption="Sınırlı Emlak Görüntüsü",
+                    use_container_width=True,
+                )
+
+                # Videoya dahil etme seçeneği
+                include_in_video = st.checkbox(
+                    "Bu görüntüyü videoya dahil et", value=True
+                )
+                if include_in_video:
+                    # Orijinal görüntüyü sınırlı olanla değiştir veya yeni görüntü olarak ekle
+                    new_maps_images = st.session_state["maps_images"].copy()
+                    new_maps_images.insert(
+                        0, bordered_image
+                    )  # Sınırlı görüntüyü ilk sıraya ekle
+                    st.session_state["maps_images"] = new_maps_images
+                    st.info("Sınırlı görüntü video görsellerine eklendi!")
+
+    def _show_custom_images(self):
+        """Kullanıcı tarafından yüklenen özel görüntüleri göster"""
+        st.subheader("Özel Görüntüler")
+        uploaded_files = st.file_uploader(
+            "Kendi görsellerinizi ekleyin:",
+            type=["jpg", "jpeg", "png"],
+            accept_multiple_files=True,
+            help="En fazla 5 görsel ekleyebilirsiniz.",
+        )
+
+        if uploaded_files:
+            user_images = []
+            for file in uploaded_files[:5]:
+                img = Image.open(file)
+                user_images.append(img)
+
+            st.session_state["user_images"] = user_images
+            st.success(f"{len(user_images)} özel görsel eklendi!")
+
+            for idx, img in enumerate(user_images):
+                st.image(
+                    img, caption=f"Özel Görsel {idx + 1}", use_container_width=True
+                )
+
+
+class VideoController:
+    """Video oluşturma ve işleme için controller"""
+
+    def __init__(self, task_manager):
+        self.task_manager = task_manager
+
+    def _check_requirements(self):
+        """
+        Videoyu oluşturmak için gerekli tüm bileşenlerin mevcut olup olmadığını kontrol eder
+
+        Returns:
+            tuple: (requirements_met, missing_components_list)
+        """
+        missing_components = []
+
+        # Ses dosyası kontrol
+        if "audio_path" not in st.session_state:
+            missing_components.append("Sesli anlatım")
+
+        # Görüntüleri kontrol et
+        if not ("maps_images" in st.session_state or "user_images" in st.session_state):
+            missing_components.append("Görüntüler")
+
+        # En az bir görüntü var mı?
+        images_count = 0
+        if "maps_images" in st.session_state:
+            images_count += len(st.session_state["maps_images"])
+        if "user_images" in st.session_state:
+            images_count += len(st.session_state["user_images"])
+
+        if images_count == 0:
+            missing_components.append("En az bir görüntü")
+
+        # Gerekli tüm bileşenler mevcut mu?
+        requirements_met = len(missing_components) == 0
+
+        return requirements_met, missing_components
+
+    def show_video_generation(self):
+        st.header("Video Oluştur")
+
+        # Gereksinimleri kontrol et
+        requirements_met, missing_components = self._check_requirements()
+
+        if not requirements_met:
+            st.warning(f"Eksik bileşenler: {', '.join(missing_components)}")
+            return
+
+        st.success("Tüm bileşenler hazır! Videoyu oluşturabilirsiniz.")
+
+        # Display system information (new)
+        display_system_info()
+
+        # Video gelişmiş ayarları için sekmeler
+        tabs = st.tabs(["Temel Ayarlar", "Arkaplan Müziği", "Metin/Logo Ekle", "Gelişmiş Efektler"])
+
+        with tabs[0]:
+            # Mevcut video ayarları
+            st.subheader("Video Ayarları")
+            resolution_option = st.selectbox(
+                "Video Çözünürlüğü",
+                ["720p (HD)", "1080p (Full HD)"],
+                index=0
+                if st.session_state.get("video_quality", "normal") == "normal"
+                else 1,
+            )
+            st.session_state["video_quality"] = (
+                "normal" if "720p" in resolution_option else "high"
+            )
+
+        with tabs[1]:
+            self._show_music_options()
+
+        with tabs[2]:
+            self._show_overlay_options()
+            
+        with tabs[3]:
+            self._show_advanced_effects()
+
+        # After all images are loaded but before video generation
+        # Add a preview section (new)
+        all_images = []
+        if "maps_images" in st.session_state:
+            all_images.extend(st.session_state["maps_images"][:8])
+        if "user_images" in st.session_state:
+            all_images.extend(st.session_state["user_images"][:5])
+
+        if all_images:
+            show_video_preview(all_images, st.session_state.get("audio_path", None))
+
+        # Your existing video generation button
+        if st.button("Video Oluştur", type="primary"):
+            self._generate_video()
+
+    def _show_music_options(self):
+        """Arkaplan müziği seçeneklerini göster"""
+        st.subheader("🎵 Arkaplan Müziği Ekle")
+
+        music_options = get_music_options()
+        selected_music = st.selectbox(
+            "Müzik Türü Seçin:",
+            list(music_options.keys()),
+            format_func=lambda k: music_options[k],
+        )
+
+        # Özel müzik yükleme seçeneği
+        if selected_music == "custom":
+            uploaded_music = st.file_uploader(
+                "Kendi müziğinizi yükleyin:", type=["mp3", "wav", "ogg"]
+            )
+            if uploaded_music:
+                # Geçici dosya oluştur
+                temp_dir = tempfile.mkdtemp()
+                music_path = os.path.join(
+                    temp_dir, f"custom_music.{uploaded_music.name.split('.')[-1]}"
+                )
+
+                with open(music_path, "wb") as f:
+                    f.write(uploaded_music.getbuffer())
+
+                st.session_state["background_music_path"] = music_path
+                st.success("Müzik başarıyla yüklendi!")
+                st.audio(music_path)
+
+        elif selected_music != "no_music":
+            st.info(f"Seçilen müzik: {music_options[selected_music]}")
+    def _show_overlay_options(self):
+        """Metin ve logo ekleme seçeneklerini göster"""
+        st.subheader("✏️ Metinler ve Logolar")
+
+        # Metin ekleme seçeneği
+        use_text_overlay = st.checkbox(
+            "Videoya Metin Ekle", value=st.session_state.get("use_text_overlay", False)
+        )
+        st.session_state["use_text_overlay"] = use_text_overlay
+
+        if use_text_overlay:
+            text_content = st.text_input(
+                "Metin İçeriği:",
+                value=st.session_state.get("overlay_text", ""),
+                placeholder="Örn: Emlak360 - www.emlak360.com",
+            )
+            st.session_state["overlay_text"] = text_content
+
+            text_position = st.selectbox(
+                "Metin Konumu:",
+                [
+                    "bottom",
+                    "top",
+                    "top-left",
+                    "top-right",
+                    "bottom-left",
+                    "bottom-right",
+                ],
+                index=0,
+                format_func=lambda x: {
+                    "bottom": "Alt Orta",
+                    "top": "Üst Orta",
+                    "top-left": "Sol Üst",
+                    "top-right": "Sağ Üst",
+                    "bottom-left": "Sol Alt",
+                    "bottom-right": "Sağ Alt",
+                }.get(x, x),
+            )
+            st.session_state["overlay_text_position"] = text_position
+
+            text_color = st.color_picker("Metin Rengi:", "#FFFFFF")
+            st.session_state["overlay_text_color"] = text_color
+
+        # Logo ekleme seçeneği
+        use_logo_overlay = st.checkbox(
+            "Videoya Logo Ekle", value=st.session_state.get("use_logo_overlay", False)
+        )
+        st.session_state["use_logo_overlay"] = use_logo_overlay
+
+        if use_logo_overlay:
+            uploaded_logo = st.file_uploader(
+                "Logo Yükleyin:", type=["png", "jpg", "jpeg"]
+            )
+
+            if uploaded_logo:
+                # Logo pozisyonu ve boyutu
+                logo_img = Image.open(uploaded_logo)
+                st.session_state["overlay_logo"] = logo_img
+
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    st.image(logo_img, caption="Logo Önizleme", width=200)
+
+                with col2:
+                    logo_position = st.selectbox(
+                        "Logo Konumu:",
+                        ["bottom-right", "bottom-left", "top-right", "top-left"],
+                        index=0,
+                        format_func=lambda x: {
+                            "bottom-right": "Sağ Alt",
+                            "bottom-left": "Sol Alt",
+                            "top-right": "Sağ Üst",
+                            "top-left": "Sol Üst",
+                        }.get(x, x),
+                    )
+                    st.session_state["overlay_logo_position"] = logo_position
+
+                    logo_size = st.slider("Logo Boyutu (%):", 5, 30, 15)
+                    st.session_state["overlay_logo_size"] = logo_size
+
+                    logo_opacity = st.slider(
+                        "Logo Şeffaflığı:", 0.1, 1.0, 0.8, step=0.1
+                    )
+                    st.session_state["overlay_logo_opacity"] = logo_opacity
+
+    def _show_advanced_effects(self):
+        """Show advanced video effect options"""
+        st.subheader("🎬 Gelişmiş Video Efektleri")
+        
+        # Cinematic color grading options
+        st.write("**Renk Efektleri**")
+        cinematic_effect = st.selectbox(
+            "Sinematik Efekt:",
+            ["Yok", "Standart Sinematik", "Sıcak Tonlar", "Soğuk Tonlar", "Vintage"],
+            format_func=lambda x: {
+                "Yok": "Efekt Yok",
+                "Standart Sinematik": "Standart Sinematik Görünüm",
+                "Sıcak Tonlar": "Sıcak Tonlar (Emlak İç Mekan)",
+                "Soğuk Tonlar": "Soğuk Tonlar (Modern Tasarım)",
+                "Vintage": "Vintage/Nostaljik"
+            }.get(x, x)
+        )
+        
+        effect_map = {
+            "Standart Sinematik": "cinematic",
+            "Sıcak Tonlar": "warm",
+            "Soğuk Tonlar": "cool",
+            "Vintage": "vintage"
+        }
+        
+        if cinematic_effect != "Yok":
+            st.session_state["cinematic_effect"] = effect_map.get(cinematic_effect)
+            st.success(f"'{cinematic_effect}' efekti uygulanacak")
+        else:
+            st.session_state.pop("cinematic_effect", None)
+        
+        # Stabilization option
+        st.write("**Video Stabilizasyonu**")
+        stabilize = st.checkbox("Video stabilizasyonu uygula (kamera titremelerini azaltır)", value=True)
+        st.session_state["stabilize_video"] = stabilize
+        
+        if stabilize:
+            st.info("Stabilizasyon, video oluşturma süresini uzatabilir ancak daha profesyonel sonuçlar sağlar.")
+        
+        # Deep image enhancement
+        st.write("**Görüntü İyileştirme**")
+        deep_enhance = st.checkbox("Yapay zeka ile görüntü kalitesini artır", value=False)
+        st.session_state["deep_enhance"] = deep_enhance
+        
+        if deep_enhance:
+            st.info("Bu özellik, görüntülerin yapay zeka ile işlenmesini sağlar ve daha keskin, detaylı sonuçlar üretir.")
+            # Add deep enhancement options
+            col1, col2 = st.columns(2)
+            with col1:
+                resolution_boost = st.checkbox("Çözünürlük artırma", value=True)
+                st.session_state["deep_enhance_resolution"] = resolution_boost
+            with col2:
+                denoise = st.checkbox("Gürültü azaltma", value=True)
+                st.session_state["deep_enhance_denoise"] = denoise
+
+    def _generate_video(self):
+        """Generate video with progress tracking"""
+        try:
+            # Create progress placeholder
+            progress_placeholder = st.empty()
+            progress_bar = progress_placeholder.progress(0)
+            status_text = st.empty()
+            
+            with st.spinner("Video oluşturma başlatılıyor..."):
+                all_images = []
+                if "maps_images" in st.session_state:
+                    all_images.extend(st.session_state["maps_images"][:8])
+                if "user_images" in st.session_state:
+                    all_images.extend(st.session_state["user_images"][:5])
+
+                if not all_images:
+                    st.error("En az bir görüntü gerekli!")
+                    return
+
+                # Start background task with correct arguments
+                task_id = self.task_manager.start_task(
+                    generate_video_in_background,
+                    task_args=(
+                        all_images,
+                        st.session_state["audio_path"],
+                        st.session_state["transition_type"],
+                        st.session_state["fps"],
+                        st.session_state["video_quality"]
+                    ),
+                    task_name="video_generation",
+                    timeout=180
+                )
+                
+                st.session_state["video_task_id"] = task_id
+                
+        except Exception as e:
+            st.error(f"Video oluşturma hatası: {str(e)}")
+            st.exception(e)  # Show detailed error traceback in UI
+            if "video_task_id" in st.session_state:
+                del st.session_state["video_task_id"]
+
+
+class PropertyVideoWizard:
+    """Adım adım rehber arayüzü için sınıf"""
+
+    def __init__(self):
+        self.step = st.session_state.get("wizard_step", 0)
+        self.steps = [
+            self.address_step,
+            self.property_details_step,
+            self.audio_generation_step,
+            self.image_collection_step,
+            self.video_generation_step,
+        ]
+        # Task manager ekle
+        self.task_manager = BackgroundTaskManager()
+
+    def show(self):
+        """Wizard arayüzünü göster"""
+        # İlerleme çubuğu
+        st.progress(self.step / (len(self.steps) - 1))
+
+        # Mevcut adımı göster
+        self.steps[self.step]()
+
+        # Gezinme kontrolleri
+        col1, col2 = st.columns(2)
+        with col1:
+            if self.step > 0:
+                if st.button("⬅️ Önceki Adım"):
+                    st.session_state["wizard_step"] = self.step - 1
+                    safe_rerun()
+        with col2:
+            if self.step < len(self.steps) - 1:
+                if st.button("Sonraki Adım ➡️"):
+                    # İlerlemeden önce mevcut adımı doğrula
+                    if self.validate_step():
+                        st.session_state["wizard_step"] = self.step + 1
+                        safe_rerun()
+
+    def validate_step(self):
+        """Mevcut adımın geçerli olup olmadığını kontrol et"""
+        # Her adım için doğrulama mantığı burada uygulanabilir
+        if self.step == 0 and "property_location" not in st.session_state:
+            st.error("Devam etmek için bir adres girin!")
+            return False
+        elif self.step == 1 and "property_text" not in st.session_state:
+            st.error("Devam etmek için emlak metnini oluşturun!")
+            return False
+        elif self.step == 2 and "audio_path" not in st.session_state:
+            st.error("Devam etmek için sesli anlatım oluşturun!")
+            return False
+        elif self.step == 3 and not (
+            "maps_images" in st.session_state or "user_images" in st.session_state
+        ):
+            st.error("Devam etmek için en az bir görüntü ekleyin!")
+            return False
+
+        return True
+
+    # Adım uygulamaları (her biri ilgili controller'ı kullanır)
+    def address_step(self):
+        st.header("1. Adım: Emlak Konumunu Belirleyin")
+        # PropertyController kullanılabilir burada...
+
+    def property_details_step(self):
+        st.header("2. Adım: Emlak Bilgilerini Girin")
+        property_controller = PropertyController()
+        property_controller.show_property_form()
+
+    def audio_generation_step(self):
+        st.header("3. Adım: Sesli Anlatım Oluşturun")
+        audio_controller = AudioController()
+        audio_controller.show_audio_generation()
+
+    def image_collection_step(self):
+        st.header("4. Adım: Görüntüleri Toplayın")
+        image_controller = ImageController()
+        image_controller.show_image_collection()
+
+    def video_generation_step(self):
+        st.header("5. Adım: Video Oluşturun")
+        video_controller = VideoController(self.task_manager)
+        video_controller.show_video_generation()
+
+
+# Ana uygulama çalıştırma kodu
+if __name__ == "__main__":
+    app = EmlakVideoApp()
+    app.run()
+-e 
+

@@ -19,6 +19,9 @@ except ImportError:
     def stabilize_video_sequence(frames, smoothing_window=30):
         return frames
 
+# Add to imports
+from modules.ai.vertex_services import VertexAIService
+
 def update_progress(progress_callback, percentage, message):
     """Safely update progress with valid percentage"""
     if progress_callback:
@@ -29,7 +32,27 @@ def update_progress(progress_callback, percentage, message):
 
 def create_frame_effect(image, n_frames, effect_type="zoom", zoom_in=True, pan_direction="right"):
     """Create effect frames for a single image"""
-    img_array = np.array(image)
+    # First process image with Vertex AI
+    try:
+        vertex_service = VertexAIService()
+        processed_image = vertex_service.process_image(image)
+        img_array = np.array(processed_image)
+    except Exception as e:
+        print(f"Falling back to local processing: {e}")
+        # Fall back to original processing
+        if isinstance(image, Image.Image):
+            img_array = np.array(image)
+        else:
+            img_array = image.copy()
+    
+    # Ensure we're working with color images
+    if len(img_array.shape) == 2:  # Grayscale
+        img_array = cv2.cvtColor(img_array, cv2.COLOR_GRAY2RGB)
+    elif len(img_array.shape) == 3 and img_array.shape[2] == 1:  # Single channel
+        img_array = cv2.cvtColor(img_array, cv2.COLOR_GRAY2RGB)
+    elif len(img_array.shape) == 3 and img_array.shape[2] == 4:  # RGBA
+        img_array = cv2.cvtColor(img_array, cv2.COLOR_RGBA2RGB)
+        
     h, w = img_array.shape[:2]
     frames = []
     
@@ -44,7 +67,7 @@ def create_frame_effect(image, n_frames, effect_type="zoom", zoom_in=True, pan_d
             y2, x2 = y1 + new_h, x1 + new_w
             
             if 0 <= y1 < y2 <= h and 0 <= x1 < x2 <= w:
-                # Apply Gaussian blur for smoother transitions
+                # Apply Gaussian blur for smoother transitions while preserving color
                 cropped = img_array[y1:y2, x1:x2]
                 if factor != 1.0:
                     blur_size = int(max(1, min(3, abs(1-factor) * 5)))
@@ -63,49 +86,16 @@ def create_frame_effect(image, n_frames, effect_type="zoom", zoom_in=True, pan_d
             
         for shift in shifts:
             shift = int(shift)
-            # Create translation matrix
-            if pan_direction in ["right", "left"]:
-                M = np.float32([[1, 0, -shift], [0, 1, 0]])
-            else:
-                M = np.float32([[1, 0, 0], [0, 1, -shift]])
-                
-            # Apply perspective transform for more natural movement
+            M = np.float32([[1, 0, -shift], [0, 1, 0]]) if pan_direction in ["right", "left"] else np.float32([[1, 0, 0], [0, 1, -shift]])
+            
+            # Apply affine transform while preserving colors
             frame = cv2.warpAffine(img_array, M, (w, h), 
                                  flags=cv2.INTER_LANCZOS4,
                                  borderMode=cv2.BORDER_REFLECT)
             frames.append(frame)
     
-    # Apply stabilization if needed
-    if len(frames) > 2:
-        stabilized_frames = []
-        prev_frame = frames[0]
-        for frame in frames[1:]:
-            # Calculate and apply minimal stabilization
-            try:
-                orb = cv2.ORB_create()
-                kp1, des1 = orb.detectAndCompute(prev_frame, None)
-                kp2, des2 = orb.detectAndCompute(frame, None)
-                
-                if des1 is not None and des2 is not None:
-                    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-                    matches = bf.match(des1, des2)
-                    
-                    if matches:
-                        src_pts = np.float32([kp1[m.queryIdx].pt for m in matches]).reshape(-1, 1, 2)
-                        dst_pts = np.float32([kp2[m.trainIdx].pt for m in matches]).reshape(-1, 1, 2)
-                        
-                        M, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
-                        if M is not None:
-                            frame = cv2.warpPerspective(frame, M, (w, h))
-            except Exception:
-                pass  # Fall back to original frame if stabilization fails
-                
-            stabilized_frames.append(frame)
-            prev_frame = frame
-        
-        frames = [frames[0]] + stabilized_frames
-    
-    return frames
+    # Ensure all frames are in RGB format
+    return [cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) if frame.shape[-1] == 3 else frame for frame in frames]
 
 def apply_cinematic_effects(frames, effect_type="cinematic"):
     """
@@ -277,35 +267,97 @@ def optimize_image_for_video(image, target_width, target_height):
 def generate_video(images, audio_path, transition_type, fps, quality, temp_dir, final_path, progress_callback=None):
     """Generate video with progress tracking"""
     try:
-        if progress_callback:
-            progress_callback(0.01, "Video oluşturma başlatılıyor...")
-            
-        # Create temporary working directory
+        # Add debug logging
+        print(f"Starting video generation with {len(images)} images")
+        print(f"Transition type: {transition_type}")
+        
         work_dir = os.path.join(temp_dir, f'video_work_{time.strftime("%Y%m%d-%H%M%S")}')
         os.makedirs(work_dir, exist_ok=True)
-        
-        # Process images
-        if progress_callback:
-            progress_callback(0.1, "Görüntüler işleniyor...")
-            
-        processed_images = []
-        for i, img in enumerate(images):
-            temp_img_path = os.path.join(work_dir, f'frame_{i}.jpg')
-            img.save(temp_img_path)
-            processed_images.append(temp_img_path)
+
+        def update_progress(percentage, message):
             if progress_callback:
-                progress_callback(0.1 + (0.4 * (i/len(images))), f"Görüntü {i+1}/{len(images)} işleniyor...")
+                progress_callback(percentage, message)
+                print(f"Progress: {message} ({percentage:.1%})")
+
+        update_progress(0.01, "Video oluşturma başlatılıyor...")
+
+        # Set video parameters based on quality
+        target_size = (1920, 1080) if quality == "high" else (1280, 720)
+        bitrate = "4000k" if quality == "high" else "2000k"
+
+        # Process and collect all frames
+        all_frames = []
+        total_images = len(images)
         
-        # Generate video
-        if progress_callback:
-            progress_callback(0.5, "Video oluşturuluyor...")
+        for i, img in enumerate(images):
+            # Process image
+            optimized = optimize_image_for_video(img, target_size[0], target_size[1])
             
+            # Generate effect frames for this image
+            frames = create_frame_effect(
+                optimized,
+                n_frames=int(fps * 2.5),  # 2.5 seconds per image
+                effect_type=transition_type
+            )
+            
+            if frames:
+                all_frames.extend(frames)
+            
+            update_progress(0.4 * (i / total_images), f"Görüntü hazırlanıyor {i+1}/{total_images}...")
+            
+            if i % 3 == 0:
+                optimize_memory_usage()
+
+        # Validate frames
+        if not all_frames:
+            print("No frames were generated!")  # Debug log
+            raise ValueError("No valid frames were generated!")
+            
+        print(f"Total frames generated: {len(all_frames)}")  # Debug log
+
+        update_progress(0.6, "Video oluşturuluyor...")
+
+        # Create video clip
+        clip = ImageSequenceClip(all_frames, fps=fps)
         
+        # Add audio if available
+        if os.path.exists(audio_path):
+            update_progress(0.8, "Ses ekleniyor...")
+            audio = AudioFileClip(audio_path)
+            clip = clip.set_audio(audio)
         
+        # Write final video
+        update_progress(0.9, "Video kaydediliyor...")
+        clip.write_videofile(
+            final_path,
+            codec="libx264",
+            audio_codec="aac",
+            bitrate=bitrate,
+            fps=fps,
+            threads=2,
+            logger=None
+        )
+        
+        # Cleanup
+        update_progress(0.95, "Geçici dosyalar temizleniyor...")
+        try:
+            clip.close()
+            if os.path.exists(audio_path):
+                audio.close()
+            import shutil
+            shutil.rmtree(work_dir)
+        except:
+            pass
+        
+        update_progress(1.0, "Video oluşturma tamamlandı!")
+        return final_path
+
     except Exception as e:
+        print(f"Video generation error: {str(e)}")
+        traceback.print_exc()
         if progress_callback:
             progress_callback(0, f"Hata: {str(e)}")
-        raise e
+        raise
 
 def generate_video_with_ffmpeg(images, audio_path, fps=30, quality="normal", progress_callback=None):
     """
