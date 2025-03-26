@@ -1,5 +1,5 @@
-# IMPORTANT: This must be the first Streamlit command in the app
 import streamlit as st
+from typing import List, Dict, Tuple
 
 st.set_page_config(
     page_title="Sanal Drone Emlak Video Oluşturucu",
@@ -7,7 +7,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-"""Emlak Video Oluşturucu - Ana Uygulama"""
+"""Emlak Video Oluşturucu - Ana Uygulama (Türkçe)"""
 
 from PIL import Image
 import gc
@@ -28,7 +28,7 @@ from config.config import (
     VOICE_OPTIONS,
     DEFAULT_VOICE,
     VIDEO_DIR,
-)
+):VOICE_OPTIONS,DEFAULT_VOICE
 from modules.text.text_generation import generate_property_description
 from modules.audio.audio_generation import generate_audio_from_text, get_audio_duration
 from modules.image.image_processing import (
@@ -46,13 +46,10 @@ from streamlit_folium import st_folium
 from utils.state_manager import StateManager
 from utils.background_tasks import BackgroundTaskManager, generate_video_in_background
 
-# Add missing imports
 import cv2
 import numpy as np
 import tempfile
 
-# Import overlay and music functions
-from modules.video.overlay_tools import add_text_overlay, add_logo_overlay
 from modules.audio.music_library import get_music_options, mix_audio, download_music
 from utils.cache_utils import cached_data, clear_cache, clear_disk_cache
 
@@ -60,12 +57,10 @@ from utils.cache_utils import cached_data, clear_cache, clear_disk_cache
 from utils.system_check import display_system_info
 from modules.video.preview_utils import show_video_preview
 
-# Fix the rerun function usage
 from streamlit import runtime
 from streamlit.runtime.scriptrunner import get_script_run_ctx
 
-# Add at the top with other imports
-import os
+
 from pathlib import Path
 
 # Add after other constants
@@ -76,7 +71,7 @@ STORAGE_DIR = os.path.join(os.path.dirname(__file__), 'storage')
 os.makedirs(TEMP_DIR, exist_ok=True)
 os.makedirs(STORAGE_DIR, exist_ok=True)
 
-def safe_rerun():
+def safe_rerun() -> None:
     """Safely rerun the app"""
     try:
         st.rerun()
@@ -91,12 +86,13 @@ def safe_rerun():
 # Ana uygulama sınıfı
 class EmlakVideoApp:
     def __init__(self):
-        # Uygulama başlangıç ayarları
+        """Uygulama başlangıç ayarları"""
         self.initialize_app()
 
-        # Durum yöneticisi ve arka plan görev yöneticisi oluştur
+        
         self.state_manager = StateManager()
         self.task_manager = BackgroundTaskManager()
+
 
     def initialize_app(self):
         """Uygulamayı başlat ve gerekli dizinleri oluştur"""
@@ -106,7 +102,6 @@ class EmlakVideoApp:
     def run(self):
         """Ana uygulama akışını çalıştır"""
         # Başlık ve sidebar'ı ayarla
-        self.setup_header()
         self.setup_sidebar()
 
         # Emlak adres girişi (ana ekranda her zaman görünür)
@@ -116,33 +111,36 @@ class EmlakVideoApp:
         self.check_background_tasks()
 
         # Ana sekmeleri oluştur
-        if "current_view" not in st.session_state:
-            st.session_state["current_view"] = "tabs"  # Varsayılan görünüm: tabs
+        self.setup_header()
+        self.show_interface()
 
-        if st.session_state["current_view"] == "tabs":
+    def show_interface(self):
+        """Görünümü sekmeler veya sihirbaz olarak göster"""
+        if st.session_state.get("current_view", "tabs") == "tabs":
             self.show_tabbed_interface()
         else:
-            # Alternatif olarak wizard arayüzü eklenebilir
             self.show_wizard_interface()
 
     def setup_header(self):
         """Uygulama başlığını ve üst bilgiyi ayarla"""
-        st.title("🏠 Sanal Drone Emlak Video Oluşturucu")
+        st.title("🏠 Sanal Drone ile Emlak Video Oluşturucu")
 
-        # Proje yönetimi butonları
-        col1, col2, col3 = st.columns(3)
-
+        col1, col2, col3 = st.columns([2, 1, 1])
+        
         with col1:
-            if st.button("💾 Projeyi Kaydet"):
+            pass
+        with col2:
+            if st.button("💾 Projeyi Kaydet", help="Mevcut çalışmanızı kaydedin"):
                 self.save_project()
 
-        with col2:
-            if st.button("📂 Projeyi Aç"):
-                self.load_project()
-
         with col3:
-            if st.button("🧹 Önbelleği Temizle"):
+            if st.button("📂 Projeyi Aç", help="Daha önce kaydedilmiş bir projeyi yükleyin"):
+                self.load_project()
+        
+        if st.button("🧹 Önbelleği Temizle", help="Uygulama önbelleğini temizler"):
                 self.clear_cache()
+            
+
 
     def setup_sidebar(self):
         """Kenar çubuğu ayarlarını oluştur"""
@@ -150,22 +148,20 @@ class EmlakVideoApp:
             st.header("Video Ayarları")
 
             # Görünüm seçimi
-            st.session_state["current_view"] = st.radio(
-                "Arayüz Görünümü",
-                options=["tabs"],
-                format_func=lambda x: "Sekmeli Görünüm"
-                
+            st.session_state["current_view"] = st.selectbox(
+                "Arayüz Görünümü:",
+                options=["tabs", "wizard"],
+                format_func=lambda x: "Sekmeli Görünüm" if x == "tabs" else "Adım Adım Sihirbaz",
             )
 
             # Video ayarları
             st.session_state["fps"] = st.slider(
-                "Kare Hızı (FPS)", 15, 60, 30, help="Saniyedeki kare sayısı"
+                "Kare Hızı (FPS):", 15, 60, 30, help="Saniyedeki kare sayısı"
             )
             st.session_state["video_quality"] = st.radio(
-                "Video Kalitesi",
+                "Video Kalitesi:",
                 ["normal", "high"],
-                format_func=lambda x: "Normal (720p)"
-                if x == "normal"
+                format_func=lambda x: "Normal (720p)" if x == "normal"
                 else "Yüksek (1080p)",
             )
             st.session_state["transition_type"] = st.selectbox(
@@ -173,9 +169,9 @@ class EmlakVideoApp:
             )
 
             # Görüntü iyileştirme ayarları
-            st.session_state["enhance_colors"] = st.checkbox(
-                "Görüntü Renklerini Geliştir", value=True
-            )
+            st.session_state["enhance_colors"] = st.checkbox("Görüntü Renklerini Geliştir", value=True, 
+                                                              help="Görüntü renklerini otomatik olarak iyileştir")
+            
             st.session_state["color_boost"] = st.slider("Renk Canlılığı", 1.0, 2.5, 1.5)
 
             # Şablonlar menüsü
@@ -183,7 +179,7 @@ class EmlakVideoApp:
 
     def show_templates(self):
         """Hazır şablonları göster ve uygula"""
-        st.subheader("📋 Hazır Şablonlar")
+        st.subheader("📋 Hazır Şablonlar:", help="Hazır şablonları kullanın veya özel ayarlar yapın")
 
         templates = {
             "Lüks Konut": {
@@ -222,12 +218,14 @@ class EmlakVideoApp:
                 "description": "Deniz ve göl manzaralarını öne çıkaran, mavi tonları vurgulayan ayarlar.",
             },
         }
-
+        
         selected_template = st.selectbox(
-            "Şablon Seç:", ["Özel"] + list(templates.keys())
+            "Şablon Seçin:", ["Özel"] + list(templates.keys())
         )
 
         if selected_template != "Özel":
+            # Template title
+            st.subheader(f"'{selected_template}' Şablonu")
             # Seçilen şablonun açıklamasını göster
             st.info(templates[selected_template]["description"])
 
@@ -236,7 +234,7 @@ class EmlakVideoApp:
                 template = templates[selected_template]
                 for key, value in template.items():
                     if key != "description":  # Açıklama hariç diğer özellikleri ayarla
-                        st.session_state[key] = value
+                         st.session_state[key] = value
                 st.success(f"'{selected_template}' şablonu uygulandı!")
                 safe_rerun()
 
@@ -257,7 +255,6 @@ class EmlakVideoApp:
                         "lat": lat,
                         "lng": lng,
                         "formatted_address": formatted_address,
-                    }
                     st.success(f"Konum bulundu: {formatted_address}")
 
                     # Harita oluştur ve göster
@@ -361,7 +358,7 @@ class EmlakVideoApp:
                     if st.button(
                         "🔄 Yeniden Dene", help="Video oluşturmayı tekrar deneyin"
                     ):
-                        del st.session_state["video_task_id"]
+                        
                         safe_rerun()
 
                     del st.session_state["video_task_id"]
@@ -423,6 +420,7 @@ class EmlakVideoApp:
         cc()  # Streamlit önbelleği temizler
 
         # Disk önbelleğini temizle
+        
         from utils.cache_utils import clear_disk_cache
 
         clear_disk_cache()
@@ -443,7 +441,7 @@ class EmlakVideoApp:
         )
 
         # Her sekme için ilgili controller'ı çağır
-        with tabs[0]:
+        with tabs[0]: 
             property_controller = PropertyController()
             property_controller.show_property_form()
 
@@ -471,23 +469,23 @@ class PropertyController:
 
     def show_property_form(self):
         st.header("Emlak Bilgileri")
-        if "property_location" not in st.session_state:
-            st.warning("Lütfen önce emlak adresini girin!")
-            return
+        if "property_location" not in st.session_state: 
+            st.warning("Lütfen önce emlak adresini giriniz!")
+            return 
 
         col1, col2 = st.columns(2)
 
         with col1:
             property_type = st.selectbox(
-                "Emlak Tipi:",
+                "Emlak Tipi:", 
                 ["Daire", "Villa", "Müstakil Ev", "Arsa", "Ticari", "Diğer"],
             )
             rooms = st.number_input("Oda Sayısı:", min_value=0, max_value=20, value=3)
             bathrooms = st.number_input(
-                "Banyo Sayısı:", min_value=0, max_value=10, value=1
+                "Banyo Sayısı:", min_value=0, max_value=10, value=1 
             )
 
-        with col2:
+        with col2: 
             area = st.number_input("Metrekare:", min_value=1, value=120)
             price = st.number_input("Fiyat (TL):", min_value=0, value=1500000)
             year_built = st.number_input(
@@ -496,7 +494,7 @@ class PropertyController:
 
         special_features = st.text_area(
             "Özel Özellikler:",
-            placeholder="Örnek: Deniz manzarası, yüzme havuzu, güvenlik, otopark vb.",
+            placeholder="Örnek: Deniz manzarası, yüzme havuzu, güvenlik, otopark vb.", 
             height=100,
         )
 
@@ -519,7 +517,7 @@ class PropertyController:
     def _get_nearby_info(self):
         """Yakın çevre bilgilerini getir"""
         include_nearby = st.checkbox("Yakın Çevre Bilgilerini Ekle", value=True)
-        nearby_places = None
+        nearby_places = None 
 
         if include_nearby:
             nearby_radius = st.slider(
@@ -537,7 +535,7 @@ class PropertyController:
 
                 if nearby_places:
                     with st.expander("Yakındaki Önemli Noktalar"):
-                        for place in sorted(nearby_places, key=lambda x: x["distance"]):
+                        for place in sorted(nearby_places, key=lambda x: x["distance"]): 
                             st.write(
                                 f"🏢 **{place['name']}** ({place['type'].replace('_', ' ')}) - {place['distance']}m"
                             )
@@ -568,7 +566,7 @@ class PropertyController:
                 "special_features": special_features,
                 "description": "",
             }
-
+            
             generated_text = generate_property_description(
                 property_data, nearby_places if nearby_places else None
             )
@@ -576,7 +574,7 @@ class PropertyController:
             if generated_text:
                 st.session_state["property_text"] = generated_text
                 st.success("Metin başarıyla oluşturuldu!")
-                st.markdown("### Oluşturulan Metin:")
+                st.markdown("### Oluşturulan Metin:") 
                 st.write(generated_text)
 
                 edited_text = st.text_area(
@@ -593,10 +591,10 @@ class AudioController:
     def show_audio_generation(self):
         st.header("Sesli Anlatım Oluştur")
 
-        if "property_text" not in st.session_state:
+        if "property_text" not in st.session_state: 
             st.warning("Lütfen önce emlak bilgilerini girin!")
             return
-
+        
         st.write(st.session_state["property_text"])
 
         # Ses seçenekleri eklenebilir
@@ -607,7 +605,7 @@ class AudioController:
             index=list(VOICE_OPTIONS.keys()).index(DEFAULT_VOICE),
         )
         st.session_state["voice_id"] = voice_id
-
+        
         if st.button("Sesli Anlatım Oluştur"):
             self._generate_audio()
 
@@ -631,8 +629,8 @@ class ImageController:
     def show_image_collection(self):
         st.header("Görüntüleri Topla")
 
-        if "property_location" not in st.session_state:
-            st.warning("Lütfen önce emlak adresini girin!")
+        if "property_location" not in st.session_state: 
+            st.warning("Lütfen önce emlak adresini girin!") 
             return
 
         col1, col2 = st.columns(2)
@@ -648,11 +646,11 @@ class ImageController:
         st.subheader("Harita Görüntüleri")
 
         zoom_level = st.slider("Yakınlaştırma Seviyesi", 15, 20, 18)
-        map_type = st.selectbox(
+        map_type = st.selectbox( 
             "Harita Tipi",
             ["satellite", "hybrid", "roadmap"],
             format_func=lambda x: {
-                "satellite": "Uydu",
+                "satellite":"Uydu",
                 "hybrid": "Hibrit",
                 "roadmap": "Yol Haritası",
             }[x],
@@ -665,7 +663,7 @@ class ImageController:
         if (
             "maps_images" in st.session_state
             and len(st.session_state["maps_images"]) > 0
-        ):
+        ): 
             self._show_border_drawing()
 
     def _fetch_map_images(self, zoom_level, map_type):
@@ -735,10 +733,10 @@ class ImageController:
         # Sınır çizilecek görüntüyü seç
         image_options = [
             f"Görüntü {i + 1}" for i in range(len(st.session_state["maps_images"]))
-        ]
-        selected_img_idx = st.selectbox(
+        ] 
+        selected_img_idx = st.selectbox( 
             "Sınır çizilecek görüntüyü seçin:",
-            range(len(image_options)),
+            range(len(image_options)), 
             format_func=lambda i: image_options[i],
         )
 
@@ -753,7 +751,7 @@ class ImageController:
         with col_color:
             border_colors = {
                 "#FF0000": "Kırmızı",
-                "#00FF00": "Yeşil",
+                "#00FF00":"Yeşil",
                 "#0000FF": "Mavi",
                 "#FFFF00": "Sarı",
                 "#FF00FF": "Mor",
@@ -772,7 +770,7 @@ class ImageController:
             border_ratio = st.slider(
                 "Sınır Konumu:",
                 0.05,
-                0.45,
+                0.45, 
                 0.2,
                 help="0.5'e yakın değerler sınırı merkeze, 0'a yakın değerler kenarlara yaklaştırır",
             )
@@ -813,7 +811,7 @@ class ImageController:
         st.subheader("Özel Görüntüler")
         uploaded_files = st.file_uploader(
             "Kendi görsellerinizi ekleyin:",
-            type=["jpg", "jpeg", "png"],
+            type=["jpg", "jpeg", "png"], 
             accept_multiple_files=True,
             help="En fazla 5 görsel ekleyebilirsiniz.",
         )
@@ -846,21 +844,21 @@ class VideoController:
         Returns:
             tuple: (requirements_met, missing_components_list)
         """
-        missing_components = []
+        missing_components = [] 
 
         # Ses dosyası kontrol
-        if "audio_path" not in st.session_state:
+        if "audio_path" not in st.session_state: 
             missing_components.append("Sesli anlatım")
 
         # Görüntüleri kontrol et
-        if not ("maps_images" in st.session_state or "user_images" in st.session_state):
+        if not ("maps_images" in st.session_state or "user_images" in st.session_state): 
             missing_components.append("Görüntüler")
 
         # En az bir görüntü var mı?
         images_count = 0
-        if "maps_images" in st.session_state:
+        if "maps_images" in st.session_state: 
             images_count += len(st.session_state["maps_images"])
-        if "user_images" in st.session_state:
+        if "user_images" in st.session_state: 
             images_count += len(st.session_state["user_images"])
 
         if images_count == 0:
@@ -874,8 +872,8 @@ class VideoController:
     def show_video_generation(self):
         st.header("Video Oluştur")
 
-        # Gereksinimleri kontrol et
-        requirements_met, missing_components = self._check_requirements()
+        # Gereksinimleri kontrol et 
+        requirements_met, missing_components = self._check_requirements() 
 
         if not requirements_met:
             st.warning(f"Eksik bileşenler: {', '.join(missing_components)}")
@@ -883,10 +881,8 @@ class VideoController:
 
         st.success("Tüm bileşenler hazır! Videoyu oluşturabilirsiniz.")
 
-        # Display system information (new)
-        display_system_info()
-
-        # Video gelişmiş ayarları için sekmeler
+        display_system_info() 
+        
         tabs = st.tabs(["Temel Ayarlar", "Arkaplan Müziği", "Metin/Logo Ekle", "Gelişmiş Efektler"])
 
         with tabs[0]:
@@ -905,15 +901,13 @@ class VideoController:
 
         with tabs[1]:
             self._show_music_options()
-
+            
         with tabs[2]:
             self._show_overlay_options()
             
         with tabs[3]:
             self._show_advanced_effects()
 
-        # After all images are loaded but before video generation
-        # Add a preview section (new)
         all_images = []
         if "maps_images" in st.session_state:
             all_images.extend(st.session_state["maps_images"][:8])
@@ -930,16 +924,18 @@ class VideoController:
     def _show_music_options(self):
         """Arkaplan müziği seçeneklerini göster"""
         st.subheader("🎵 Arkaplan Müziği Ekle")
-
+        
         music_options = get_music_options()
         selected_music = st.selectbox(
             "Müzik Türü Seçin:",
             list(music_options.keys()),
-            format_func=lambda k: music_options[k],
+            format_func=lambda k: music_options[k], 
         )
+        
+        if selected_music == "no_music":
+            st.info("Müzik seçilmedi")
+        elif selected_music == "custom": 
 
-        # Özel müzik yükleme seçeneği
-        if selected_music == "custom":
             uploaded_music = st.file_uploader(
                 "Kendi müziğinizi yükleyin:", type=["mp3", "wav", "ogg"]
             )
@@ -956,12 +952,13 @@ class VideoController:
                 st.session_state["background_music_path"] = music_path
                 st.success("Müzik başarıyla yüklendi!")
                 st.audio(music_path)
-
+                
         elif selected_music != "no_music":
             st.info(f"Seçilen müzik: {music_options[selected_music]}")
+    
     def _show_overlay_options(self):
         """Metin ve logo ekleme seçeneklerini göster"""
-        st.subheader("✏️ Metinler ve Logolar")
+        st.subheader("✏️ Metinler ve Logolar", help="Videoya metin ve logo ekleme ayarları")
 
         # Metin ekleme seçeneği
         use_text_overlay = st.checkbox(
@@ -1050,11 +1047,11 @@ class VideoController:
         st.subheader("🎬 Gelişmiş Video Efektleri")
         
         # Cinematic color grading options
-        st.write("**Renk Efektleri**")
+        st.write("**Renk Efektleri**", help="Videoya renk efekti ekleme ayarları")
         cinematic_effect = st.selectbox(
             "Sinematik Efekt:",
             ["Yok", "Standart Sinematik", "Sıcak Tonlar", "Soğuk Tonlar", "Vintage"],
-            format_func=lambda x: {
+            format_func=lambda x: { 
                 "Yok": "Efekt Yok",
                 "Standart Sinematik": "Standart Sinematik Görünüm",
                 "Sıcak Tonlar": "Sıcak Tonlar (Emlak İç Mekan)",
@@ -1077,11 +1074,11 @@ class VideoController:
             st.session_state.pop("cinematic_effect", None)
         
         # Stabilization option
-        st.write("**Video Stabilizasyonu**")
+        st.write("**Video Stabilizasyonu**", help="Video stabilizasyon ayarları")
         stabilize = st.checkbox("Video stabilizasyonu uygula (kamera titremelerini azaltır)", value=True)
         st.session_state["stabilize_video"] = stabilize
         
-        if stabilize:
+        if stabilize: 
             st.info("Stabilizasyon, video oluşturma süresini uzatabilir ancak daha profesyonel sonuçlar sağlar.")
         
         # Deep image enhancement
@@ -1101,12 +1098,12 @@ class VideoController:
                 st.session_state["deep_enhance_denoise"] = denoise
 
     def _generate_video(self):
-        """Generate video with progress tracking"""
+        """Video Oluşturma Süreci"""
         try:
             # Create progress placeholder
-            progress_placeholder = st.empty()
+            progress_placeholder = st.empty() 
             progress_bar = progress_placeholder.progress(0)
-            status_text = st.empty()
+            status_text = st.empty() 
             
             with st.spinner("Video oluşturma başlatılıyor..."):
                 all_images = []
@@ -1117,12 +1114,12 @@ class VideoController:
 
                 if not all_images:
                     st.error("En az bir görüntü gerekli!")
-                    return
+                    return 
 
                 # Start background task with correct arguments
                 task_id = self.task_manager.start_task(
                     generate_video_in_background,
-                    task_args=(
+                    task_args=( 
                         all_images,
                         st.session_state["audio_path"],
                         st.session_state["transition_type"],
@@ -1131,10 +1128,10 @@ class VideoController:
                     ),
                     task_name="video_generation",
                     timeout=180
-                )
+                ) 
                 
                 st.session_state["video_task_id"] = task_id
-                
+        
         except Exception as e:
             st.error(f"Video oluşturma hatası: {str(e)}")
             st.exception(e)  # Show detailed error traceback in UI
@@ -1184,28 +1181,27 @@ class PropertyVideoWizard:
         """Mevcut adımın geçerli olup olmadığını kontrol et"""
         # Her adım için doğrulama mantığı burada uygulanabilir
         if self.step == 0 and "property_location" not in st.session_state:
-            st.error("Devam etmek için bir adres girin!")
-            return False
-        elif self.step == 1 and "property_text" not in st.session_state:
-            st.error("Devam etmek için emlak metnini oluşturun!")
-            return False
-        elif self.step == 2 and "audio_path" not in st.session_state:
-            st.error("Devam etmek için sesli anlatım oluşturun!")
-            return False
-        elif self.step == 3 and not (
-            "maps_images" in st.session_state or "user_images" in st.session_state
-        ):
+            st.error("Devam etmek için bir adres girin!", icon="🚨")
+            return False 
+        elif self.step == 1 and "property_text" not in st.session_state: 
+            st.error("Devam etmek için emlak metnini oluşturun!", icon="🚨")
+            return False 
+        elif self.step == 2 and "audio_path" not in st.session_state: 
+            st.error("Devam etmek için sesli anlatım oluşturun!", icon="🚨")
+            return False 
+        elif self.step == 3 and not ("maps_images" in st.session_state or "user_images" in st.session_state):
             st.error("Devam etmek için en az bir görüntü ekleyin!")
             return False
 
-        return True
+        return True 
 
     # Adım uygulamaları (her biri ilgili controller'ı kullanır)
-    def address_step(self):
+    def address_step(self): 
         st.header("1. Adım: Emlak Konumunu Belirleyin")
         # PropertyController kullanılabilir burada...
 
-    def property_details_step(self):
+    
+    def property_details_step(self): 
         st.header("2. Adım: Emlak Bilgilerini Girin")
         property_controller = PropertyController()
         property_controller.show_property_form()
