@@ -1,33 +1,45 @@
 """Video generation and effects functions.""" 
 
 import os
+import sys
 import tempfile
 import cv2
 import numpy as np
 import streamlit as st
-from PIL import Image
+from PIL import Image, ImageSequence
 import traceback
 import gc
 from moviepy.editor import ImageSequenceClip, AudioFileClip, VideoFileClip
 import time
+from typing import List, Tuple, Optional, Callable, Union, Any
 
-# Import new modules - ensure they exist
+
+# Import new modules - ensure they exist (advanced_stabilization)
 try:
     from modules.video.advanced_stabilization import stabilize_video_sequence
 except ImportError:
-    # Fallback if module doesn't exist
-    def stabilize_video_sequence(frames, smoothing_window=30):
+    # Fallback if module doesn't exist (mock function)
+    def stabilize_video_sequence(frames: List[np.ndarray], smoothing_window: int = 30) -> List[np.ndarray]:
+        """Mock function for stabilize_video_sequence if module is not available."""
         return frames
 
-def update_progress(progress_callback, percentage, message):
-    """Safely update progress with valid percentage"""
+
+def update_progress(progress_callback: Optional[Callable[[float, str], None]], percentage: float, message: str) -> None:
+    """
+    Safely update progress with a valid percentage.
+
+    Args:
+        progress_callback: Function to update progress.
+        percentage: Progress percentage (0.0 to 1.0).
+        message: Message to display with progress.
+    """
     if progress_callback:
         # Ensure percentage is between 0-1
         safe_percentage = max(0.0, min(1.0, percentage))
         progress_callback(safe_percentage, message)
         print(f"Progress: {message} ({safe_percentage:.1%})")
 
-def create_frame_effect(image, n_frames, effect_type="zoom", zoom_in=True, pan_direction="right"):
+def create_frame_effect(image: Union[Image.Image, np.ndarray], n_frames: int, effect_type: str = "zoom", zoom_in: bool = True, pan_direction: str = "right") -> List[np.ndarray]:
     """Create effect frames for a single image"""
     img_array = np.array(image)
     h, w = img_array.shape[:2]
@@ -35,6 +47,7 @@ def create_frame_effect(image, n_frames, effect_type="zoom", zoom_in=True, pan_d
     
     if effect_type == "zoom":
         # Use smooth easing function for zoom
+        # Apply zoom in or zoom out based in user input
         zoom_range = np.array([1 - np.cos(x * np.pi / 2) for x in np.linspace(0, 1, n_frames)])
         zoom_range = 1.0 + (0.3 if zoom_in else -0.3) * zoom_range
         
@@ -48,11 +61,13 @@ def create_frame_effect(image, n_frames, effect_type="zoom", zoom_in=True, pan_d
                 cropped = img_array[y1:y2, x1:x2]
                 if factor != 1.0:
                     blur_size = int(max(1, min(3, abs(1-factor) * 5)))
+                    # Apply Gaussian blur for smoother transitions
                     cropped = cv2.GaussianBlur(cropped, (blur_size*2+1, blur_size*2+1), 0)
                 frame = cv2.resize(cropped, (w, h), interpolation=cv2.INTER_LANCZOS4)
                 frames.append(frame)
     
     elif effect_type == "pan":
+        # Calculate shift for pan effect
         # Use smooth easing for pan effect
         max_shift = w // 4 if pan_direction in ["right", "left"] else h // 4
         shifts = np.array([1 - np.cos(x * np.pi / 2) for x in np.linspace(0, 1, n_frames)])
@@ -73,6 +88,7 @@ def create_frame_effect(image, n_frames, effect_type="zoom", zoom_in=True, pan_d
             frame = cv2.warpAffine(img_array, M, (w, h), 
                                  flags=cv2.INTER_LANCZOS4,
                                  borderMode=cv2.BORDER_REFLECT)
+            # Add current frame to array
             frames.append(frame)
     
     # Apply stabilization if needed
@@ -81,6 +97,7 @@ def create_frame_effect(image, n_frames, effect_type="zoom", zoom_in=True, pan_d
         prev_frame = frames[0]
         for frame in frames[1:]:
             # Calculate and apply minimal stabilization
+            # Apply stabilization with ORB algorithm. If not possible apply the current frame
             try:
                 orb = cv2.ORB_create()
                 kp1, des1 = orb.detectAndCompute(prev_frame, None)
@@ -107,16 +124,16 @@ def create_frame_effect(image, n_frames, effect_type="zoom", zoom_in=True, pan_d
     
     return frames
 
-def apply_cinematic_effects(frames, effect_type="cinematic"):
+def apply_cinematic_effects(frames: List[np.ndarray], effect_type: str = "cinematic") -> List[np.ndarray]:
     """
-    Apply cinematic color grading and visual effects
-    
+    Apply cinematic color grading and visual effects to a list of frames.
+
     Args:
-        frames: List of frames
-        effect_type: Type of cinematic effect (cinematic, warm, cool, vintage)
-        
+        frames: List of frames (numpy arrays).
+        effect_type: Type of cinematic effect (cinematic, warm, cool, vintage).
+
     Returns:
-        List of processed frames
+        List of processed frames (numpy arrays).
     """
     processed_frames = []
     
@@ -125,6 +142,7 @@ def apply_cinematic_effects(frames, effect_type="cinematic"):
     
     for frame in frames:
         if effect_type == "warm":
+            # Add a warm cinematic look
             # Warm cinematic look
             frame_lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
             l, a, b = cv2.split(frame_lab)
@@ -138,6 +156,7 @@ def apply_cinematic_effects(frames, effect_type="cinematic"):
             frame = apply_vignette(frame, 0.3)
             
         elif effect_type == "cool":
+            # Add a cool cinematic look
             # Cool cinematic look
             frame_lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
             l, a, b = cv2.split(frame_lab)
@@ -148,9 +167,10 @@ def apply_cinematic_effects(frames, effect_type="cinematic"):
             frame = cv2.cvtColor(frame_lab, cv2.COLOR_LAB2BGR)
             
         elif effect_type == "vintage":
-            # Vintage look
+            # Add a vintage film look
             frame = apply_vintage_effect(frame)
             
+            # Default cinematic
         else:  # Default cinematic
             # Standard cinematic grade (slight contrast boost, richer shadows)
             frame = apply_cinematic_grade(frame)
@@ -159,8 +179,18 @@ def apply_cinematic_effects(frames, effect_type="cinematic"):
         
     return processed_frames
 
-def apply_vignette(image, intensity=0.5):
-    """Apply a vignette effect to an image"""
+
+def apply_vignette(image: np.ndarray, intensity: float = 0.5) -> np.ndarray:
+    """
+    Apply a vignette effect to an image.
+
+    Args:
+        image: Input image (numpy array).
+        intensity: Intensity of the vignette effect (0.0 to 1.0).
+
+    Returns:
+        Image with vignette effect applied (numpy array).
+    """
     height, width = image.shape[:2]
     
     # Create a radial gradient mask
@@ -180,8 +210,17 @@ def apply_vignette(image, intensity=0.5):
     
     return vignette.astype(np.uint8)
 
-def apply_cinematic_grade(image):
-    """Apply basic cinematic color grading"""
+
+def apply_cinematic_grade(image: np.ndarray) -> np.ndarray:
+    """
+    Apply basic cinematic color grading to an image.
+
+    Args:
+        image: Input image (numpy array).
+
+    Returns:
+        Image with cinematic color grading (numpy array).
+    """
     # Convert to float for processing
     img_float = image.astype(np.float32) / 255.0
     
@@ -207,8 +246,17 @@ def apply_cinematic_grade(image):
     
     return img_graded
 
-def apply_vintage_effect(image):
-    """Apply a vintage film effect"""
+
+def apply_vintage_effect(image: np.ndarray) -> np.ndarray:
+    """
+    Apply a vintage film effect to an image.
+
+    Args:
+        image: Input image (numpy array).
+
+    Returns:
+        Image with vintage film effect (numpy array).
+    """
     # Create sepia tone effect
     sepia = np.array([[0.393, 0.769, 0.189],
                      [0.349, 0.686, 0.168],
@@ -226,19 +274,20 @@ def apply_vintage_effect(image):
     
     return vintage
 
-def optimize_image_for_video(image, target_width, target_height):
+def optimize_image_for_video(image: Union[Image.Image, np.ndarray], target_width: int, target_height: int) -> np.ndarray:
     """
-    Optimize an image for video processing to reduce memory usage
-    
+    Optimize an image for video processing to reduce memory usage.
+
     Args:
-        image: PIL Image
-        target_width: Desired width
-        target_height: Desired height
-        
+        image: Input image (PIL Image or numpy array).
+        target_width: Desired width for the optimized image.
+        target_height: Desired height for the optimized image.
+
     Returns:
-        Optimized numpy array in BGR format
+        Optimized numpy array in BGR format.
     """
     try:
+        # Process if image is a PIL format
         # Convert PIL to numpy if needed
         if isinstance(image, Image.Image):
             # Resize image to target dimensions
@@ -254,6 +303,7 @@ def optimize_image_for_video(image, target_width, target_height):
             # Convert RGB to BGR for OpenCV
             img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
         else:
+            # Process if image is a numpy array
             # Already numpy array, just resize
             img_array = cv2.resize(image, (target_width, target_height))
             
@@ -273,8 +323,9 @@ def optimize_image_for_video(image, target_width, target_height):
         cv2.putText(blank, "Image Error", (50, target_height//2), 
                   cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
         return blank
+        
 
-def generate_video(images, audio_path, transition_type, fps, quality, temp_dir, final_path, progress_callback=None):
+def generate_video(images: List[Image.Image], audio_path: str, transition_type: str, fps: int, quality: str, temp_dir: str, final_path: str, progress_callback: Optional[Callable[[float, str], None]] = None) -> None:
     """Generate video with progress tracking"""
     try:
         if progress_callback:
@@ -307,20 +358,20 @@ def generate_video(images, audio_path, transition_type, fps, quality, temp_dir, 
             progress_callback(0, f"Hata: {str(e)}")
         raise e
 
-def generate_video_with_ffmpeg(images, audio_path, fps=30, quality="normal", progress_callback=None):
+def generate_video_with_ffmpeg(images: List[Union[Image.Image, np.ndarray]], audio_path: str, fps: int = 30, quality: str = "normal", progress_callback: Optional[Callable[[float, str], None]] = None) -> str:
     """
-    Fallback method to generate video using FFmpeg directly via moviepy
-    
-    Args:
-        images: List of PIL images
-        audio_path: Path to audio file
-        fps: Frames per second
-        quality: Video quality (normal/high)
-        progress_callback: Callback for progress reporting
-        
-    Returns:
-        Path to generated video
-    """
+        Fallback method to generate video using FFmpeg directly via moviepy.
+
+        Args:
+            images: List of PIL images or numpy arrays.
+            audio_path: Path to audio file.
+            fps: Frames per second.
+            quality: Video quality (normal/high).
+            progress_callback: Callback for progress reporting.
+
+        Returns:
+            Path to generated video.
+        """
     from moviepy.editor import ImageSequenceClip, AudioFileClip
     import tempfile
     import os
@@ -331,7 +382,7 @@ def generate_video_with_ffmpeg(images, audio_path, fps=30, quality="normal", pro
     progress_bar = st.progress(0.20)  # Start at 20%
     
     def update_progress(percent, message):
-        if progress_callback:
+        if progress_callback is not None:
             progress_callback(percent, message)
         progress_bar.progress(percent)
         progress_text.text(message)
@@ -377,7 +428,7 @@ def generate_video_with_ffmpeg(images, audio_path, fps=30, quality="normal", pro
                 frames.append(img_array)
                 
             # Force memory cleanup after each image
-            if i % 2 == 0:
+            if i % 5 == 0:
                 optimize_memory_usage()
                 
         except Exception as e:
@@ -398,7 +449,7 @@ def generate_video_with_ffmpeg(images, audio_path, fps=30, quality="normal", pro
         silent_path = os.path.join(temp_dir, "silent.mp4")
         clip.write_videofile(
             silent_path,
-            codec="libx264",
+            codec="libx264", # H.264 encoding
             audio_codec=None,
             bitrate=bitrate,
             fps=fps,
@@ -407,6 +458,7 @@ def generate_video_with_ffmpeg(images, audio_path, fps=30, quality="normal", pro
         )
         return silent_path
     
+    # Adding audio to the video
     audio = AudioFileClip(audio_path)
     clip = clip.set_audio(audio)
     
@@ -454,10 +506,17 @@ def generate_video_with_ffmpeg(images, audio_path, fps=30, quality="normal", pro
     
     return final_path
 
-def optimize_memory_usage():
-    """Force garbage collection and free memory"""
+
+def optimize_memory_usage() -> int:
+    """
+    Force garbage collection and attempt to release unused memory.
+
+    Returns:
+        The number of garbage objects collected.
+    """
     import gc
     import sys
+    import ctypes
     
     # Force garbage collection
     collected = gc.collect()
@@ -465,10 +524,10 @@ def optimize_memory_usage():
     # Try to release more memory if on Linux
     if sys.platform.startswith('linux'):
         try:
-            # Use malloc_trim to release memory back to OS
-            import ctypes
-            ctypes.CDLL('libc.so.6').malloc_trim(0)
-        except:
-            pass
+            libc = ctypes.CDLL('libc.so.6')
+            libc.malloc_trim(0)
+        except Exception as e:
+            print(f"malloc_trim error: {str(e)}")
     
     return collected
+

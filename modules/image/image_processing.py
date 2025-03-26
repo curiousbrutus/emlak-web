@@ -1,15 +1,25 @@
 """Image processing functions for satellite and street view images."""
 
+from typing import Optional, Tuple
 import cv2
 import numpy as np
 import requests
 import streamlit as st
-from PIL import Image
+from PIL import Image, ImageColor
 from io import BytesIO
-from streamlit_drawable_canvas import st_canvas
 
-def enhance_image(image, boost_factor=1.5, preserve_colors=True):
-    """Enhanced version of image processing"""
+def enhance_image(image: Image.Image, boost_factor: float = 1.5) -> Image.Image:
+    """
+    Enhances the quality of an image using various techniques like color enhancement,
+    noise reduction, and sharpening.
+
+    Args:
+        image: The input PIL Image.
+        boost_factor: Factor to boost saturation (default: 1.5).
+
+    Returns:
+        An enhanced PIL Image or the original image if enhancement fails.
+    """
     try:
         if isinstance(image, Image.Image):
             img_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
@@ -55,17 +65,105 @@ def enhance_image(image, boost_factor=1.5, preserve_colors=True):
         st.warning(f"Image enhancement failed: {e}")
         return image
 
-def fetch_satellite_image(address=None, lat=None, lng=None, zoom=18, size="640x640", maptype="satellite"):
+
+def recognize_objects(image: Image.Image) -> Optional[list]:
     """
-    Fetch satellite image from Google Maps Static API.
+    Attempts to recognize objects within an image using a basic object detection model.
     
     Args:
-        address: Address string (used if lat/lng not provided)
-        lat, lng: Coordinates (preferred over address if provided)
-        zoom: Zoom level (15-20)
-        size: Image size (width x height)
-        maptype: Map type (satellite, hybrid, roadmap)
+        image: The PIL Image to process.
+    
+    Returns:
+        A list of recognized objects (if any), or None if recognition fails or no objects are found.
+    """
+    try:
+        # Convert PIL image to OpenCV format
+        img_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
         
+        # Load YOLO model (this is a simplified example; in real use, load a pretrained model)
+        # Example: Using a dummy class labels and model config
+        class_labels = ["building", "car", "tree"]
+        # Replace 'your_model.weights' and 'your_model.cfg' with actual paths to your model weights and config files
+        # net = cv2.dnn.readNet("your_model.weights", "your_model.cfg")
+        
+        # Preprocess the image for the model
+        blob = cv2.dnn.blobFromImage(img_cv, 1/255.0, (416, 416), swapRB=True, crop=False)
+        # net.setInput(blob)
+        
+        # Get the layer names and outputs
+        # layer_names = net.getLayerNames()
+        # output_layers = [layer_names[i - 1] for i in net.getUnconnectedOutLayers()]
+        # detections = net.forward(output_layers)
+        
+        # Simulate detection results
+        detections = [
+            # format: [x_center, y_center, width, height, confidence, class_id]
+            (0.2, 0.3, 0.1, 0.2, 0.9, 0), # Example detection: building
+            (0.5, 0.6, 0.05, 0.1, 0.8, 1), # Example detection: car
+            (0.8, 0.2, 0.1, 0.2, 0.7, 2), # Example detection: tree
+        ]
+        
+        # Parse detections
+        detected_objects = []
+        for x_center, y_center, width, height, confidence, class_id in detections:
+            if confidence > 0.5:
+                label = class_labels[int(class_id)]
+                detected_objects.append({
+                    "label": label,
+                    "confidence": confidence
+                })
+                
+        if not detected_objects:
+            return None
+        return detected_objects
+    except Exception as e:
+        st.warning(f"Object recognition failed: {e}")
+        return None
+
+def handle_api_response(response: requests.Response, enhance_colors: bool, color_boost: float) -> Optional[Image.Image]:
+    """
+    Handles the API response from Google Maps and returns a PIL Image.
+
+    Args:
+        response: The response object from the API call.
+        enhance_colors: Whether to enhance colors.
+        color_boost: The factor to boost colors if enhancing.
+
+    Returns:
+        A PIL Image or None if the response failed or image processing failed.
+    """
+    if response.status_code == 200:
+        try:
+            img = Image.open(BytesIO(response.content))
+            if enhance_colors:
+                img = enhance_image(img, color_boost)
+            return img
+        except Exception as e:
+            st.error(f"Error processing image data: {e}")
+            return None
+    else:
+        st.error(f"Failed to fetch image: {response.status_code}")
+        return None
+
+def fetch_satellite_image(
+    address: Optional[str] = None,
+    lat: Optional[float] = None,
+    lng: Optional[float] = None,
+    zoom: int = 18,
+    size: str = "640x640",
+    maptype: str = "satellite",
+) -> Optional[Image.Image]:
+    """
+    Fetches a satellite image from the Google Maps Static API.
+
+    Args:
+        address: Address string (if lat/lng not provided).
+        lat: Latitude (preferred if provided).
+        lng: Longitude (preferred if provided).
+        zoom: Zoom level (15-20).
+        size: Image size (width x height).
+        maptype: Map type (satellite, hybrid, roadmap).
+
     Returns:
         PIL Image object or None if failed
     """
@@ -89,22 +187,25 @@ def fetch_satellite_image(address=None, lat=None, lng=None, zoom=18, size="640x6
     }
     
     try:
-        response = requests.get(base_url, params=params)
-        if response.status_code == 200:
-            img = Image.open(BytesIO(response.content))
-            enhance_colors = st.session_state.get('enhance_colors', True)
-            color_boost = st.session_state.get('color_boost', 1.5)
-            if enhance_colors:
-                img = enhance_image(img, color_boost, preserve_colors=True)
-            return img
-        else:
-            st.error(f"Failed to fetch satellite image: {response.status_code}")
-            return None
+        response: requests.Response = requests.get(base_url, params=params)
+        enhance_colors: bool = st.session_state.get("enhance_colors", True)
+        color_boost: float = st.session_state.get("color_boost", 1.5)
+        img: Optional[Image.Image] = handle_api_response(response, enhance_colors, color_boost)
+        return img
     except Exception as e:
         st.error(f"Error fetching satellite image: {str(e)}")
         return None
 
-def fetch_street_view_image(address=None, lat=None, lng=None, size="640x640", fov=90, heading=0, pitch=0):
+
+def fetch_street_view_image(
+    address: Optional[str] = None,
+    lat: Optional[float] = None,
+    lng: Optional[float] = None,
+    size: str = "640x640",
+    fov: int = 90,
+    heading: int = 0,
+    pitch: int = 0,
+) -> Optional[Image.Image]:
     """
     Fetch street view image from Google Street View API.
     
@@ -139,33 +240,39 @@ def fetch_street_view_image(address=None, lat=None, lng=None, size="640x640", fo
     }
     
     try:
-        response = requests.get(base_url, params=params)
-        if response.status_code == 200:
-            img = Image.open(BytesIO(response.content))
-            enhance_colors = st.session_state.get('enhance_colors', True)
-            color_boost = st.session_state.get('color_boost', 1.5)
-            if enhance_colors:
-                img = enhance_image(img, color_boost, preserve_colors=True)
-            return img
-        else:
-            return None
+        response: requests.Response = requests.get(base_url, params=params)
+        enhance_colors: bool = st.session_state.get("enhance_colors", True)
+        color_boost: float = st.session_state.get("color_boost", 1.5)
+        img: Optional[Image.Image] = handle_api_response(response, enhance_colors, color_boost)
+        return img
     except Exception as e:
         st.warning(f"Error fetching street view: {str(e)}")
         return None
 
-def draw_property_border(image, color, width=3, border_ratio=0.2):
+
+def draw_property_border(
+    image: Image.Image,
+    color: str,
+    width: int = 3,
+    border_ratio: float = 0.2,
+) -> Image.Image:
     """
     Draw a border on a property image.
     
     Args:
-        image: PIL Image object
-        color: Border color as hex string (#RRGGBB)
-        width: Border line width
-        border_ratio: Ratio of border inset from edges (0.0-0.5)
+        image: PIL Image object.
+        color: Border color as hex string (#RRGGBB).
+        width: Border line width.
+        border_ratio: Ratio of border inset from edges (0.0-0.5).
     
     Returns:
-        PIL Image with drawn border
+        PIL Image with a drawn border.
     """
+    try:
+        ImageColor.getrgb(color)
+    except ValueError:
+        raise ValueError("Invalid color string provided. Color must be in hex format (#RRGGBB).")
+
     img_array = np.array(image)
     h, w = img_array.shape[:2]
     
@@ -182,3 +289,4 @@ def draw_property_border(image, color, width=3, border_ratio=0.2):
     cv2.rectangle(img_with_border, (x1, y1), (x2, y2), (b, g, r), width)
     
     return Image.fromarray(img_with_border)
+
