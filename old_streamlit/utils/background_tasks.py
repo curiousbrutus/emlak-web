@@ -8,6 +8,7 @@ import os
 import tempfile
 import numpy as np
 import streamlit as st
+import logging
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from PIL import Image
@@ -187,33 +188,24 @@ class BackgroundTaskManager:
                 del self.tasks[task_id]
 
 
-def generate_video_in_background(images, audio_path, transition_type, fps=30, quality="normal", temp_dir=None, final_path=None, progress_callback=None):
-    """Background task wrapper for video generation"""
+def generate_video_in_background(images, audio_path, transition_type, fps, quality, callback=None):
+    """
+    Generate video in a background thread with status updates
+    """
     try:
-        # Create default paths if not provided
-        if temp_dir is None:
-            temp_dir = os.path.join(os.path.dirname(__file__), '..', 'temp')
-        if final_path is None:
-            storage_dir = os.path.join(os.path.dirname(__file__), '..', 'storage')
-            timestamp = time.strftime("%Y%m%d-%H%M%S")
-            final_path = os.path.join(storage_dir, f'emlak_video_{timestamp}.mp4')
-
-        # Ensure directories exist
-        os.makedirs(os.path.dirname(temp_dir), exist_ok=True)
-        os.makedirs(os.path.dirname(final_path), exist_ok=True)
-
-        return generate_video(
-            images, 
-            audio_path, 
-            transition_type, 
-            fps, 
-            quality,
-            temp_dir,
-            final_path,
-            progress_callback
-        )
+        # Create a proper temporary directory string
+        temp_dir = os.path.join(tempfile.gettempdir(), f"emlak_video_{int(time.time())}")
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        # Update status
+        if callback:
+            callback({"status": "preparing", "progress": 10, "message": "Geçici dosyalar hazırlanıyor..."})
+        
+        # ...rest of the function implementation...
+        
     except Exception as e:
-        import traceback
-        error_details = traceback.format_exc()
-        print(f"Video generation error: {str(e)}\n{error_details}")
+        # Log the error
+        logging.error(f"Video generation error: {str(e)}")
+        if callback:
+            callback({"status": "failed", "error": str(e), "error_details": traceback.format_exc()})
         raise

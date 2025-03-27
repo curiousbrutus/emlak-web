@@ -28,7 +28,7 @@ from config.config import (
     VOICE_OPTIONS,
     DEFAULT_VOICE,
     VIDEO_DIR,
-):VOICE_OPTIONS,DEFAULT_VOICE
+)
 from modules.text.text_generation import generate_property_description
 from modules.audio.audio_generation import generate_audio_from_text, get_audio_duration
 from modules.image.image_processing import (
@@ -254,7 +254,9 @@ class EmlakVideoApp:
                     st.session_state["property_location"] = {
                         "lat": lat,
                         "lng": lng,
-                        "formatted_address": formatted_address,
+                        "formatted_address": formatted_address
+                    }
+                    
                     st.success(f"Konum bulundu: {formatted_address}")
 
                     # Harita oluştur ve göster
@@ -1047,7 +1049,8 @@ class VideoController:
         st.subheader("🎬 Gelişmiş Video Efektleri")
         
         # Cinematic color grading options
-        st.write("**Renk Efektleri**", help="Videoya renk efekti ekleme ayarları")
+        st.write("**Renk Efektleri**")
+        st.caption("Videoya renk efekti ekleme ayarları")
         cinematic_effect = st.selectbox(
             "Sinematik Efekt:",
             ["Yok", "Standart Sinematik", "Sıcak Tonlar", "Soğuk Tonlar", "Vintage"],
@@ -1074,7 +1077,8 @@ class VideoController:
             st.session_state.pop("cinematic_effect", None)
         
         # Stabilization option
-        st.write("**Video Stabilizasyonu**", help="Video stabilizasyon ayarları")
+        st.write("**Video Stabilizasyonu**")
+        st.caption("Video stabilizasyon ayarları")
         stabilize = st.checkbox("Video stabilizasyonu uygula (kamera titremelerini azaltır)", value=True)
         st.session_state["stabilize_video"] = stabilize
         
@@ -1116,6 +1120,17 @@ class VideoController:
                     st.error("En az bir görüntü gerekli!")
                     return 
 
+                # Add additional parameters that may be needed
+                video_params = {
+                    "stabilize": st.session_state.get("stabilize_video", False),
+                    "cinematic_effect": st.session_state.get("cinematic_effect", None),
+                    "deep_enhance": st.session_state.get("deep_enhance", False),
+                    "overlay_text": st.session_state.get("overlay_text", "") if st.session_state.get("use_text_overlay", False) else "",
+                    "overlay_text_position": st.session_state.get("overlay_text_position", "bottom"),
+                    "overlay_text_color": st.session_state.get("overlay_text_color", "#FFFFFF"),
+                    "background_music_path": st.session_state.get("background_music_path", None)
+                }
+                
                 # Start background task with correct arguments
                 task_id = self.task_manager.start_task(
                     generate_video_in_background,
@@ -1127,7 +1142,7 @@ class VideoController:
                         st.session_state["video_quality"]
                     ),
                     task_name="video_generation",
-                    timeout=180
+                    timeout=300  # Increased timeout for processing
                 ) 
                 
                 st.session_state["video_task_id"] = task_id
