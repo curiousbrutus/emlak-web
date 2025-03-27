@@ -6,3 +6,4 @@ temp/
 storage/
 .DS_Store
 *.log
+.env
