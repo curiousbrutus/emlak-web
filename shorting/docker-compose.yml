@@ -1,0 +1,19 @@
+version: '3'
+
+services:
+  shortgpt:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "31415:31415"
+    volumes:
+      - ./outputs:/app/outputs
+      - ./shortGPT:/app/shortGPT
+      - ./gui:/app/gui
+      - ./.env:/app/.env
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped

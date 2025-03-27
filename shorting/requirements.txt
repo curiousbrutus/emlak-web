@@ -1,0 +1,27 @@
+python-dotenv~=1.0.0
+gradio~=3.32.0
+openai==1.37.0
+httpx==0.27.2
+tiktoken
+tinydb~=4.7.1
+tinymongo
+proglog
+yt-dlp~=2023.3.4
+torch
+torchaudio
+### whisper timestamped 
+whisper-timestamped
+protobuf==3.20.3
+pillow~=9.5.0
+moviepy==2.1.2
+progress
+questionary
+edge-tts
+requests~=2.28.2
+numpy~=1.24.2
+pydub~=0.25.1
+ffmpeg-python~=0.2.0
+opencv-python~=4.7.0.72
+streamlit-folium~=0.11.1
+folium~=0.14.0
+google-api-python-client~=2.86.0
